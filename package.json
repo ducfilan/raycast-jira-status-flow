@@ -18,20 +18,36 @@
     {
       "name": "jira-advance-to-next-status",
       "title": "Jira: Advance to Next Status",
-      "description": "",
-      "mode": "view"
+      "description": "Advance a Jira ticket to its next workflow status",
+      "mode": "view",
+      "arguments": [
+        {
+          "name": "ticketKey",
+          "placeholder": "PROJ-123",
+          "type": "text",
+          "required": false
+        }
+      ]
     },
     {
       "name": "jira-move-to-done",
       "title": "Jira: Move to Done",
-      "description": "",
-      "mode": "view"
+      "description": "Move a Jira ticket through all remaining statuses to Done",
+      "mode": "view",
+      "arguments": [
+        {
+          "name": "ticketKey",
+          "placeholder": "PROJ-123",
+          "type": "text",
+          "required": false
+        }
+      ]
     },
     {
       "name": "jira-workflow-status-board",
       "title": "Jira: Workflow Status Board",
-      "description": "",
-      "mode": "no-view"
+      "description": "View all your in-progress Jira issues grouped by workflow status",
+      "mode": "view"
     }
   ],
   "dependencies": {
@@ -46,6 +62,34 @@
     "prettier": "^3.5.3",
     "typescript": "^5.8.2"
   },
+  "preferences": [
+    {
+      "name": "jiraCliPath",
+      "title": "Jira CLI Path",
+      "type": "textfield",
+      "required": false,
+      "default": "",
+      "placeholder": "/opt/homebrew/bin/jira",
+      "description": "Full path to the jira binary. Leave blank to use PATH."
+    },
+    {
+      "name": "jiraProject",
+      "title": "Default Project Key",
+      "type": "textfield",
+      "required": false,
+      "default": "SPFR",
+      "placeholder": "PROJ",
+      "description": "Used when entering bare ticket numbers like '123'."
+    },
+    {
+      "name": "jiraApiToken",
+      "title": "Jira API Token",
+      "type": "password",
+      "required": true,
+      "placeholder": "Your Jira API / PAT token",
+      "description": "Bearer token for Jira authentication (same as JIRA_API_TOKEN env var)."
+    }
+  ],
   "scripts": {
     "build": "ray build",
     "dev": "ray develop",
