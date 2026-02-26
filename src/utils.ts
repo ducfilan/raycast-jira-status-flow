@@ -533,15 +533,50 @@ const ROLE_STATUS_MAP: Record<string, "qa" | "reviewer"> = {
   "2ND REVIEW": "reviewer",
 };
 
+const ROLE_FIELD_NAMES: Record<"qa" | "reviewer", string> = {
+  qa: "QA",
+  reviewer: "Development Reviewer",
+};
+
 export function getRoleAssignee(role: "qa" | "reviewer"): string {
   const prefs = getPrefs();
   return (role === "qa" ? prefs.qaAssignee : prefs.reviewerAssignee)?.trim() || "";
 }
 
+async function getIssueFieldUser(ticketKey: string, fieldName: string): Promise<JiraUser | null> {
+  const fieldId = await resolveFieldId(fieldName);
+  if (!fieldId) return null;
+
+  const stdout = await runJira(`issue view ${ticketKey} --raw`);
+  let parsed: { fields?: Record<string, unknown> };
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+
+  const val = parsed?.fields?.[fieldId];
+  if (!val || typeof val !== "object") return null;
+
+  const user = val as Record<string, unknown>;
+  if (!user.accountId && !user.name && !user.key) return null;
+
+  return {
+    accountId: typeof user.accountId === "string" ? user.accountId : undefined,
+    name: typeof user.name === "string" ? user.name : (typeof user.key === "string" ? user.key as string : undefined),
+    displayName:
+      (typeof user.displayName === "string" ? user.displayName : undefined) ??
+      (typeof user.name === "string" ? user.name : undefined) ??
+      (typeof user.accountId === "string" ? user.accountId : ""),
+    emailAddress: typeof user.emailAddress === "string" ? user.emailAddress : undefined,
+  };
+}
+
 /**
  * If the target status has a configured role assignee (QA for Testing,
  * Reviewer for reviews), look up and assign that person.
- * Silently does nothing if no role is configured for the status.
+ * Checks the issue's custom field first (e.g. "QA", "Development Reviewer"),
+ * then falls back to the preference value.
  */
 export async function autoAssignForStatus(
   ticketKey: string,
@@ -549,6 +584,12 @@ export async function autoAssignForStatus(
 ): Promise<{ assigned: boolean; displayName?: string }> {
   const role = ROLE_STATUS_MAP[normalizeStatus(targetStatus)];
   if (!role) return { assigned: false };
+
+  const fieldUser = await getIssueFieldUser(ticketKey, ROLE_FIELD_NAMES[role]);
+  if (fieldUser) {
+    await assignIssue(ticketKey, fieldUser);
+    return { assigned: true, displayName: fieldUser.displayName };
+  }
 
   const email = getRoleAssignee(role);
   if (!email) return { assigned: false };
