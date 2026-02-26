@@ -341,7 +341,7 @@ The ticket has been moved through the entire workflow and is now marked as **Don
 ---
 
 \`\`\`
-📋 Waiting → 🔨 Doing → 🔗 Integration → 👀 1ST REVIEW
+📋 Waiting/TO DO → 🔨 Doing → 🔗 Integration → 👀 1ST REVIEW
   → 🧪 Testing → 🔍 2ND REVIEW → ✅ UAT
   → 🚀 Staging → 🔄 Regression → 📦 Delivering → 🎉 Done
 \`\`\`

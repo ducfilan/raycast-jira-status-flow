@@ -9,7 +9,7 @@ import {
   openExtensionPreferences,
   useNavigation,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   getMyInProgressIssues,
   transitionIssue,
@@ -18,16 +18,24 @@ import {
   getWorkflowStep,
   getWorkflowIndex,
   getRemainingSteps,
+  normalizeStatus,
   autoFillDevDates,
   parseMissingFieldsFromError,
   openIssueInJira,
+  searchJiraUser,
+  assignIssue,
+  getCommonAssignees,
+  getCurrentUser,
+  autoAssignForStatus,
   WORKFLOW,
   type JiraIssue,
+  type JiraUser,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
 
 const STATUS_COLORS: Record<string, Color> = {
   WAITING: Color.SecondaryText,
+  "TO DO": Color.SecondaryText,
   DOING: Color.Orange,
   INTEGRATION: Color.Yellow,
   "1ST REVIEW": Color.Green,
@@ -39,6 +47,155 @@ const STATUS_COLORS: Record<string, Color> = {
   DELIVERING: Color.Purple,
   DONE: Color.Green,
 };
+
+function AssigneeForm({
+  issueKey,
+  onAssigned,
+}: {
+  issueKey: string;
+  onAssigned: (assigneeName: string) => void;
+}) {
+  const { pop } = useNavigation();
+  const [query, setQuery] = useState("");
+  const [users, setUsers] = useState<JiraUser[]>([]);
+  const [searching, setSearching] = useState(false);
+  const commonAssignees = getCommonAssignees();
+
+  const doSearch = useCallback(async (q: string) => {
+    if (!q.trim()) {
+      setUsers([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const results = await searchJiraUser(q);
+      setUsers(results);
+    } catch {
+      setUsers([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => doSearch(query), 400);
+    return () => clearTimeout(timer);
+  }, [query, doSearch]);
+
+  async function handleAssign(user: JiraUser) {
+    const toast = await showToast({
+      style: Toast.Style.Animated,
+      title: `Assigning ${issueKey}`,
+      message: user.displayName,
+    });
+    try {
+      await assignIssue(issueKey, user);
+      toast.style = Toast.Style.Success;
+      toast.title = `${issueKey} assigned`;
+      toast.message = user.displayName;
+      onAssigned(user.displayName);
+      pop();
+    } catch (e: unknown) {
+      toast.style = Toast.Style.Failure;
+      toast.title = "Assign failed";
+      toast.message = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function handleQuickAssign(email: string) {
+    const toast = await showToast({ style: Toast.Style.Animated, title: "Looking up user…", message: email });
+    try {
+      const results = await searchJiraUser(email);
+      if (results.length === 0) {
+        toast.style = Toast.Style.Failure;
+        toast.title = "User not found";
+        toast.message = email;
+        return;
+      }
+      toast.hide();
+      await handleAssign(results[0]);
+    } catch (e: unknown) {
+      toast.style = Toast.Style.Failure;
+      toast.title = "Lookup failed";
+      toast.message = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function handleAssignMe() {
+    const toast = await showToast({ style: Toast.Style.Animated, title: "Looking up current user…" });
+    try {
+      const me = await getCurrentUser();
+      toast.hide();
+      await handleAssign(me);
+    } catch (e: unknown) {
+      toast.style = Toast.Style.Failure;
+      toast.title = "Failed to get current user";
+      toast.message = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  return (
+    <List
+      isLoading={searching}
+      searchText={query}
+      onSearchTextChange={setQuery}
+      searchBarPlaceholder="Search assignee by name or email…"
+      throttle
+    >
+      {query.trim() === "" && (
+        <List.Section title="Quick Assign">
+          <List.Item
+            key="__me__"
+            title="Myself"
+            icon={Icon.PersonCircle}
+            actions={
+              <ActionPanel>
+                <Action title="Assign to Myself" onAction={handleAssignMe} />
+              </ActionPanel>
+            }
+          />
+          {commonAssignees.map((email) => (
+            <List.Item
+              key={email}
+              title={email}
+              icon={Icon.Person}
+              actions={
+                <ActionPanel>
+                  <Action title={`Assign to ${email}`} onAction={() => handleQuickAssign(email)} />
+                </ActionPanel>
+              }
+            />
+          ))}
+        </List.Section>
+      )}
+
+      {users.length > 0 && (
+        <List.Section title="Search Results">
+          {users.map((u) => (
+            <List.Item
+              key={u.accountId ?? u.name ?? u.displayName}
+              title={u.displayName}
+              subtitle={u.emailAddress}
+              icon={Icon.Person}
+              actions={
+                <ActionPanel>
+                  <Action
+                    title={`Assign to ${u.displayName}`}
+                    onAction={() => handleAssign(u)}
+                  />
+                </ActionPanel>
+              }
+            />
+          ))}
+        </List.Section>
+      )}
+
+      {query.trim() !== "" && users.length === 0 && !searching && (
+        <List.EmptyView title="No users found" description={`No results for "${query}"`} />
+      )}
+    </List>
+  );
+}
 
 export default function WorkflowStatusBoard() {
   const [issues, setIssues] = useState<JiraIssue[]>([]);
@@ -116,6 +273,14 @@ export default function WorkflowStatusBoard() {
         toast.style = Toast.Style.Success;
         toast.title = `${issue.key} advanced`;
         toast.message = `${next.emoji} ${next.status}`;
+
+        try {
+          const result = await autoAssignForStatus(issue.key, next.status);
+          if (result.assigned) {
+            setIssues((prev) => prev.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)));
+            toast.message = `${next.emoji} ${next.status} → ${result.displayName}`;
+          }
+        } catch { /* auto-assign is best-effort */ }
       } catch (e: unknown) {
         toast.style = Toast.Style.Failure;
         toast.title = "Transition failed";
@@ -146,6 +311,14 @@ export default function WorkflowStatusBoard() {
       toast.style = Toast.Style.Success;
       toast.title = `${issue.key} moved back`;
       toast.message = `${prev.emoji} ${prev.status}`;
+
+      try {
+        const result = await autoAssignForStatus(issue.key, prev.status);
+        if (result.assigned) {
+          setIssues((prev_) => prev_.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)));
+          toast.message = `${prev.emoji} ${prev.status} → ${result.displayName}`;
+        }
+      } catch { /* auto-assign is best-effort */ }
     } catch (e: unknown) {
       toast.style = Toast.Style.Failure;
       toast.title = "Transition failed";
@@ -169,6 +342,7 @@ export default function WorkflowStatusBoard() {
         try {
           await transitionIssue(issue.key, step.status);
           current = step.status;
+          try { await autoAssignForStatus(issue.key, step.status); } catch { /* best-effort */ }
           await new Promise((r) => setTimeout(r, 600));
         } catch (e: unknown) {
           toast.style = Toast.Style.Failure;
@@ -206,7 +380,7 @@ export default function WorkflowStatusBoard() {
   const workflowStatuses = WORKFLOW.filter((s) => s.status !== "Done").map((s) => s.status);
 
   const grouped = workflowStatuses.reduce<Record<string, JiraIssue[]>>((acc, status) => {
-    acc[status] = issues.filter((i) => i.status.toUpperCase() === status.toUpperCase());
+    acc[status] = issues.filter((i) => normalizeStatus(i.status) === normalizeStatus(status));
     return acc;
   }, {});
 
@@ -298,6 +472,23 @@ export default function WorkflowStatusBoard() {
                         )}
                       </ActionPanel.Section>
                       <ActionPanel.Section title="Info">
+                        <Action
+                          title="Assign Ticket"
+                          icon={Icon.AddPerson}
+                          shortcut={{ modifiers: ["cmd", "shift"], key: "a" }}
+                          onAction={() =>
+                            push(
+                              <AssigneeForm
+                                issueKey={issue.key}
+                                onAssigned={(name) =>
+                                  setIssues((prev) =>
+                                    prev.map((i) => (i.key === issue.key ? { ...i, assignee: name } : i)),
+                                  )
+                                }
+                              />,
+                            )
+                          }
+                        />
                         <Action
                           title="Open in Jira"
                           shortcut={{ modifiers: ["cmd"], key: "o" }}

@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 
 export type WorkflowStatus =
   | "Waiting"
+  | "TO DO"
   | "Doing"
   | "Integration"
   | "1ST REVIEW"
@@ -41,13 +42,24 @@ export const WORKFLOW: WorkflowStep[] = [
   { status: "Done", emoji: "🎉", color: "#2DC653", description: "Completed" },
 ];
 
+const STATUS_ALIASES: Record<string, string> = {
+  "TO DO": "WAITING",
+};
+
+const STATUS_FALLBACKS: Record<string, string[]> = {};
+for (const [alias, canonical] of Object.entries(STATUS_ALIASES)) {
+  if (!STATUS_FALLBACKS[canonical]) STATUS_FALLBACKS[canonical] = [];
+  STATUS_FALLBACKS[canonical].push(alias);
+}
+
+export function normalizeStatus(status: string): string {
+  const upper = status.trim().toUpperCase();
+  return STATUS_ALIASES[upper] ?? upper;
+}
+
 export const WORKFLOW_MAP = new Map<string, WorkflowStep>(
   WORKFLOW.map((step) => [normalizeStatus(step.status), step]),
 );
-
-export function normalizeStatus(status: string): string {
-  return status.trim().toUpperCase();
-}
 
 export function getWorkflowStep(status: string): WorkflowStep | undefined {
   return WORKFLOW_MAP.get(normalizeStatus(status));
@@ -80,7 +92,11 @@ export function getRemainingSteps(currentStatus: string): WorkflowStep[] {
 interface Preferences {
   jiraCliPath: string;
   jiraProject: string;
+  jiraServer: string;
   jiraApiToken: string;
+  commonAssignees: string;
+  qaAssignee: string;
+  reviewerAssignee: string;
 }
 
 function getPrefs(): Preferences {
@@ -219,9 +235,11 @@ export async function getIssueDetails(ticketKey: string): Promise<JiraIssue> {
 // ─── Issue List (JSON) ────────────────────────────────────────────────────────
 
 export async function getMyInProgressIssues(): Promise<JiraIssue[]> {
-  const statuses = WORKFLOW.filter((s) => s.status !== "Done")
-    .map((s) => `"${s.status}"`)
-    .join(", ");
+  const aliasStatuses = Object.keys(STATUS_ALIASES).map((s) => `"${s}"`);
+  const statuses = [
+    ...WORKFLOW.filter((s) => s.status !== "Done").map((s) => `"${s.status}"`),
+    ...aliasStatuses,
+  ].join(", ");
 
   // jira-cli wraps --jql in its own query, so ORDER BY must use the --order-by flag
   const jql = `assignee = currentUser() AND status in (${statuses})`;
@@ -253,11 +271,67 @@ function parseIssueListJson(output: string): JiraIssue[] {
 
 // ─── Transitions ──────────────────────────────────────────────────────────────
 
-export async function transitionIssue(ticketKey: string, targetStatus: string): Promise<void> {
-  const stdout = await runJira(`issue move ${ticketKey} "${targetStatus}"`);
+function parseAvailableTransitions(errorMsg: string): string[] {
+  const re = /Available states for issue [^:]+:\s*(.+)/i;
+  const match = re.exec(errorMsg);
+  if (!match) return [];
+  return match[1]
+    .split(",")
+    .map((s) => s.trim().replaceAll(/(?:^')|(?:'$)/g, ""))
+    .filter(Boolean);
+}
 
+function findMatchingTransition(targetStatus: string, available: string[]): string | null {
+  const target = targetStatus.toUpperCase();
+  // Exact match
+  const exact = available.find((t) => t.toUpperCase() === target);
+  if (exact) return exact;
+  // "Back to X" pattern
+  const backTo = available.find((t) => t.toUpperCase() === `BACK TO ${target}`);
+  if (backTo) return backTo;
+  // Contains target as a suffix (e.g. "Return to Doing" matches "Doing")
+  const suffix = available.find((t) => t.toUpperCase().endsWith(target) && t.toUpperCase() !== target);
+  if (suffix) return suffix;
+  return null;
+}
+
+async function tryMove(ticketKey: string, transitionName: string): Promise<void> {
+  const stdout = await runJira(`issue move ${ticketKey} "${transitionName}"`);
   if (/error|failed|invalid/i.test(stdout) && !/✓/.test(stdout)) {
     throw new Error(`Transition may have failed.\n\nCLI output:\n${stdout.slice(0, 400)}`);
+  }
+}
+
+async function tryFallbacks(ticketKey: string, fallbacks: string[]): Promise<boolean> {
+  for (const fallback of fallbacks) {
+    try {
+      await tryMove(ticketKey, fallback);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+export async function transitionIssue(ticketKey: string, targetStatus: string): Promise<void> {
+  const fallbacks = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
+
+  try {
+    await tryMove(ticketKey, targetStatus);
+  } catch (primaryError) {
+    const errMsg = primaryError instanceof Error ? primaryError.message : String(primaryError);
+    const available = parseAvailableTransitions(errMsg);
+    const match = findMatchingTransition(targetStatus, available);
+
+    if (match) {
+      await tryMove(ticketKey, match);
+      return;
+    }
+
+    if (await tryFallbacks(ticketKey, fallbacks)) return;
+
+    throw primaryError;
   }
 }
 
@@ -310,26 +384,14 @@ const FIELD_NAME_TO_ID: Record<string, string> = {
   [DEV_DATE_FIELDS.plannedDue.name]: DEV_DATE_FIELDS.plannedDue.id,
 };
 
-let cachedAuth: { server: string; token: string } | null = null;
-
-async function getJiraAuth(): Promise<{ server: string; token: string }> {
-  if (cachedAuth) return cachedAuth;
-
-  const cli = getJiraCliPath();
-  // `sprint list --debug` is lightweight and always prints HTTP request details
-  const { stdout } = await execAsync(`${cli} sprint list --debug 2>&1`, {
-    env: shellEnv(),
-    maxBuffer: 10 * 1024 * 1024,
-  });
-
-  const tokenMatch = stdout.match(/Authorization: Bearer (\S+)/);
-  const hostMatch = stdout.match(/Host: (\S+)/);
-  if (!tokenMatch || !hostMatch) {
-    throw new Error("Could not extract Jira auth from CLI debug output.");
+function getJiraAuth(): { server: string; token: string } {
+  const prefs = getPrefs();
+  const server = prefs.jiraServer.replace(/\/+$/, "");
+  const token = prefs.jiraApiToken;
+  if (!server || !token) {
+    throw new Error("Jira Server URL and API Token must be set in preferences.");
   }
-
-  cachedAuth = { server: `https://${hostMatch[1]}`, token: tokenMatch[1] };
-  return cachedAuth;
+  return { server, token };
 }
 
 let cachedFieldMap: Record<string, string> | null = null;
@@ -339,7 +401,7 @@ async function resolveFieldId(fieldName: string): Promise<string | null> {
 
   if (!cachedFieldMap) {
     try {
-      const auth = await getJiraAuth();
+      const auth = getJiraAuth();
       const { stdout } = await execFileAsync(
         "curl",
         ["-s", `${auth.server}/rest/api/2/field`, "-H", `Authorization: Bearer ${auth.token}`],
@@ -362,7 +424,7 @@ export async function setIssueCustomFields(
   ticketKey: string,
   fields: Record<string, string>,
 ): Promise<void> {
-  const auth = await getJiraAuth();
+  const auth = getJiraAuth();
 
   const fieldData: Record<string, string> = {};
   for (const [name, value] of Object.entries(fields)) {
@@ -453,4 +515,137 @@ export function parseMissingFieldsFromError(errorMsg: string): string[] {
     .split(/[,;]|\band\b/i)
     .map((s) => s.trim().replace(/\.+$/, ""))
     .filter(Boolean);
+}
+
+// ─── Assignee Helpers ─────────────────────────────────────────────────────────
+
+export function getCommonAssignees(): string[] {
+  const raw = getPrefs().commonAssignees || "";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const ROLE_STATUS_MAP: Record<string, "qa" | "reviewer"> = {
+  TESTING: "qa",
+  "1ST REVIEW": "reviewer",
+  "2ND REVIEW": "reviewer",
+};
+
+export function getRoleAssignee(role: "qa" | "reviewer"): string {
+  const prefs = getPrefs();
+  return (role === "qa" ? prefs.qaAssignee : prefs.reviewerAssignee)?.trim() || "";
+}
+
+/**
+ * If the target status has a configured role assignee (QA for Testing,
+ * Reviewer for reviews), look up and assign that person.
+ * Silently does nothing if no role is configured for the status.
+ */
+export async function autoAssignForStatus(
+  ticketKey: string,
+  targetStatus: string,
+): Promise<{ assigned: boolean; displayName?: string }> {
+  const role = ROLE_STATUS_MAP[normalizeStatus(targetStatus)];
+  if (!role) return { assigned: false };
+
+  const email = getRoleAssignee(role);
+  if (!email) return { assigned: false };
+
+  const users = await searchJiraUser(email);
+  if (users.length === 0) return { assigned: false };
+
+  await assignIssue(ticketKey, users[0]);
+  return { assigned: true, displayName: users[0].displayName };
+}
+
+export interface JiraUser {
+  accountId?: string;
+  name?: string;
+  displayName: string;
+  emailAddress?: string;
+}
+
+async function fetchJiraUsers(url: string, token: string): Promise<JiraUser[]> {
+  const { stdout } = await execFileAsync(
+    "curl",
+    ["-s", url, "-H", `Authorization: Bearer ${token}`],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+
+  if (!Array.isArray(parsed)) return [];
+  return (parsed as Array<{ accountId?: string; name?: string; key?: string; displayName?: string; emailAddress?: string }>)
+    .filter((u) => u.accountId || u.name || u.key)
+    .map((u) => ({
+      accountId: u.accountId,
+      name: u.name ?? u.key,
+      displayName: u.displayName ?? u.name ?? u.accountId ?? "",
+      emailAddress: u.emailAddress,
+    }));
+}
+
+export async function getCurrentUser(): Promise<JiraUser> {
+  const auth = getJiraAuth();
+  const { stdout } = await execFileAsync(
+    "curl",
+    ["-s", `${auth.server}/rest/api/2/myself`, "-H", `Authorization: Bearer ${auth.token}`],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+
+  const u = JSON.parse(stdout) as { accountId?: string; name?: string; key?: string; displayName?: string; emailAddress?: string };
+  return {
+    accountId: u.accountId,
+    name: u.name ?? u.key,
+    displayName: u.displayName ?? u.name ?? u.accountId ?? "me",
+    emailAddress: u.emailAddress,
+  };
+}
+
+export async function searchJiraUser(query: string): Promise<JiraUser[]> {
+  const auth = getJiraAuth();
+  const encoded = encodeURIComponent(query);
+
+  // Jira Server uses `username`, Jira Cloud uses `query`
+  const serverResults = await fetchJiraUsers(
+    `${auth.server}/rest/api/2/user/search?username=${encoded}&maxResults=10`,
+    auth.token,
+  );
+  if (serverResults.length > 0) return serverResults;
+
+  return fetchJiraUsers(
+    `${auth.server}/rest/api/2/user/search?query=${encoded}&maxResults=10`,
+    auth.token,
+  );
+}
+
+export async function assignIssue(ticketKey: string, user: JiraUser): Promise<void> {
+  const auth = getJiraAuth();
+  const body = JSON.stringify(user.name ? { name: user.name } : { accountId: user.accountId });
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-s", "-w", "\n%{http_code}",
+      "-X", "PUT",
+      `${auth.server}/rest/api/2/issue/${ticketKey}/assignee`,
+      "-H", `Authorization: Bearer ${auth.token}`,
+      "-H", "Content-Type: application/json",
+      "-d", body,
+    ],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+
+  const lines = stdout.trim().split("\n");
+  const httpCode = lines[lines.length - 1].trim();
+  if (!httpCode.startsWith("2")) {
+    const responseBody = lines.slice(0, -1).join("\n");
+    throw new Error(`Failed to assign issue (HTTP ${httpCode}): ${responseBody.slice(0, 400)}`);
+  }
 }

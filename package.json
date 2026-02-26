@@ -82,12 +82,47 @@
       "description": "Used when entering bare ticket numbers like '123'."
     },
     {
+      "name": "jiraServer",
+      "title": "Jira Server URL",
+      "type": "textfield",
+      "required": true,
+      "placeholder": "https://yourcompany.atlassian.net",
+      "description": "Your Jira instance base URL (e.g. https://yourcompany.atlassian.net)."
+    },
+    {
       "name": "jiraApiToken",
       "title": "Jira API Token",
       "type": "password",
       "required": true,
       "placeholder": "Your Jira API / PAT token",
       "description": "Bearer token for Jira authentication (same as JIRA_API_TOKEN env var)."
+    },
+    {
+      "name": "commonAssignees",
+      "title": "Common Assignees",
+      "type": "textfield",
+      "required": false,
+      "default": "donglian.xie@shopee.com, haichao.li@shopee.com",
+      "placeholder": "user1@example.com, user2@example.com",
+      "description": "Comma-separated list of common assignee emails for quick assignment."
+    },
+    {
+      "name": "qaAssignee",
+      "title": "QA Assignee",
+      "type": "textfield",
+      "required": false,
+      "default": "donglian.xie@shopee.com",
+      "placeholder": "qa@example.com",
+      "description": "Auto-assign to this person when moving to Testing status."
+    },
+    {
+      "name": "reviewerAssignee",
+      "title": "Reviewer Assignee",
+      "type": "textfield",
+      "required": false,
+      "default": "haichao.li@shopee.com",
+      "placeholder": "reviewer@example.com",
+      "description": "Auto-assign to this person when moving to 1ST REVIEW or 2ND REVIEW status."
     }
   ],
   "scripts": {
