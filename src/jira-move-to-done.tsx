@@ -20,9 +20,10 @@ import {
   getRemainingSteps,
   getWorkflowStep,
   getWorkflowIndex,
+  getWorkflowForType,
   autoFillDevDates,
   parseMissingFieldsFromError,
-  WORKFLOW,
+  isDocType,
   type JiraIssue,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
@@ -74,7 +75,7 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
   }
 
   async function runTransitionLoop(issueData: JiraIssue) {
-    const remaining = getRemainingSteps(issueData.status);
+    const remaining = getRemainingSteps(issueData.status, issueData.type);
     if (remaining.length === 0) {
       setIssue((prev) => (prev ? { ...prev, status: "Done" } : prev));
       setTransition({ phase: "done" });
@@ -153,7 +154,7 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
   async function startMoveToDone() {
     if (!issue) return;
 
-    const remaining = getRemainingSteps(issue.status);
+    const remaining = getRemainingSteps(issue.status, issue.type);
 
     if (remaining.length === 0) {
       await showToast({ style: Toast.Style.Success, title: `${issue.key} is already Done!` });
@@ -170,30 +171,31 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
       if (!confirmed) return;
     }
 
-    // Pre-fill Dev dates from Planned counterparts before starting transitions
-    const toast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
-    try {
-      const { filled, stillMissing } = await autoFillDevDates(issue.key);
-      if (filled.length > 0) {
-        toast.title = "Auto-filled dates";
-        toast.message = filled.join(", ");
-      }
-      toast.hide();
+    if (!isDocType(issue.type)) {
+      const toast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
+      try {
+        const { filled, stillMissing } = await autoFillDevDates(issue.key);
+        if (filled.length > 0) {
+          toast.title = "Auto-filled dates";
+          toast.message = filled.join(", ");
+        }
+        toast.hide();
 
-      if (stillMissing.length > 0) {
-        push(
-          <MissingFieldsForm
-            issueKey={issue.key}
-            missingFields={stillMissing}
-            onComplete={() => runTransitionLoop(issue)}
-          />,
-        );
-        return;
+        if (stillMissing.length > 0) {
+          push(
+            <MissingFieldsForm
+              issueKey={issue.key}
+              missingFields={stillMissing}
+              onComplete={() => runTransitionLoop(issue)}
+            />,
+          );
+          return;
+        }
+      } catch (e: unknown) {
+        toast.style = Toast.Style.Failure;
+        toast.title = "Auto-fill failed, continuing…";
+        toast.message = e instanceof Error ? e.message : String(e);
       }
-    } catch (e: unknown) {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Auto-fill failed, continuing…";
-      toast.message = e instanceof Error ? e.message : String(e);
     }
 
     await runTransitionLoop(issue);
@@ -237,13 +239,14 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
 
   if (!issue) return null;
 
-  const currentStep = getWorkflowStep(issue.status);
-  const currentIndex = getWorkflowIndex(issue.status);
-  const remaining = getRemainingSteps(issue.status);
+  const workflow = getWorkflowForType(issue.type);
+  const currentStep = getWorkflowStep(issue.status, issue.type);
+  const currentIndex = getWorkflowIndex(issue.status, issue.type);
+  const remaining = getRemainingSteps(issue.status, issue.type);
   const isRunning = transition.phase === "running";
   const isDone = transition.phase === "done" || issue.status === "Done";
 
-  const markdown = buildMarkdown(issue, transition, remaining, currentIndex);
+  const markdown = buildMarkdown(issue, workflow, transition, remaining, currentIndex);
 
   return (
     <Detail
@@ -316,11 +319,13 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
 
 function buildMarkdown(
   issue: JiraIssue,
+  workflow: ReturnType<typeof getWorkflowForType>,
   transition: TransitionState,
   remaining: ReturnType<typeof getRemainingSteps>,
   currentIndex: number,
 ): string {
   if (transition.phase === "done" || issue.status === "Done") {
+    const chain = workflow.map((s) => `${s.emoji} ${s.status}`).join(" → ");
     return `# ${issue.key} — Done!
 
 All workflow stages completed successfully.
@@ -330,7 +335,7 @@ All workflow stages completed successfully.
 ---
 
 \`\`\`
-📋 → 🔨 → 🔗 → 👀 → 🧪 → 🔍 → ✅ → 🚀 → 🔄 → 🎉
+${chain}
 \`\`\`
 `;
   }
@@ -368,12 +373,12 @@ Press **⌘ + Return** to retry from here.
   }
 
   const pathSteps = remaining.map((s) => `${s.emoji} ${s.status}`).join(" → ");
-  const totalSteps = WORKFLOW.length - 1;
+  const totalSteps = workflow.length - 1;
   const progress = currentIndex >= 0 ? Math.round((currentIndex / totalSteps) * 100) : 0;
 
-  return `# ${issue.key} — Move to Done
+  return `# ${issue.key} — Move to Done (${issue.type || "Task"})
 
-## Current Status: ${getWorkflowStep(issue.status)?.emoji ?? ""} ${issue.status}
+## Current Status: ${getWorkflowStep(issue.status, issue.type)?.emoji ?? ""} ${issue.status}
 
 **Progress:** ${progress}% complete (${remaining.length} step${remaining.length !== 1 ? "s" : ""} remaining)
 

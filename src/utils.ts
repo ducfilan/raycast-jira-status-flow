@@ -5,16 +5,22 @@ import { getPreferenceValues } from "@raycast/api";
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
-// ─── Workflow Definition ──────────────────────────────────────────────────────
+// ─── Workflow Definitions ─────────────────────────────────────────────────────
 
 export type WorkflowStatus =
   | "Waiting"
   | "TO DO"
+  | "Req. Gathering"
+  | "Feasibility Study"
+  | "PRD"
+  | "Tech Design"
   | "Doing"
+  | "Developing"
   | "Integration"
   | "1ST REVIEW"
   | "Testing"
   | "2ND REVIEW"
+  | "Reviewing"
   | "UAT"
   | "Staging"
   | "Regression"
@@ -28,7 +34,7 @@ export interface WorkflowStep {
   description: string;
 }
 
-export const WORKFLOW: WorkflowStep[] = [
+export const TASK_WORKFLOW: WorkflowStep[] = [
   { status: "Waiting", emoji: "📋", color: "#8B9EB0", description: "Waiting to be started" },
   { status: "Doing", emoji: "🔨", color: "#F4A261", description: "Actively in development" },
   { status: "Integration", emoji: "🔗", color: "#E9C46A", description: "Integrating with other services" },
@@ -41,6 +47,46 @@ export const WORKFLOW: WorkflowStep[] = [
   { status: "Delivering", emoji: "📦", color: "#6A4C93", description: "Delivering to production" },
   { status: "Done", emoji: "🎉", color: "#2DC653", description: "Completed" },
 ];
+
+export const EPIC_WORKFLOW: WorkflowStep[] = [
+  { status: "Waiting", emoji: "📋", color: "#8B9EB0", description: "Waiting to be started" },
+  { status: "Req. Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
+  { status: "Feasibility Study", emoji: "🔎", color: "#457B9D", description: "Feasibility analysis" },
+  { status: "PRD", emoji: "📄", color: "#1D3557", description: "Product requirements document" },
+  { status: "Tech Design", emoji: "🏗️", color: "#264653", description: "Technical design" },
+  { status: "Developing", emoji: "💻", color: "#F4A261", description: "Actively in development" },
+  { status: "Integration", emoji: "🔗", color: "#E9C46A", description: "Integrating with other services" },
+  { status: "Testing", emoji: "🧪", color: "#4361EE", description: "QA / manual testing" },
+  { status: "UAT", emoji: "✅", color: "#3A86FF", description: "User acceptance testing" },
+  { status: "Staging", emoji: "🚀", color: "#FF6B6B", description: "Deployed to staging" },
+  { status: "Regression", emoji: "🔄", color: "#FB8500", description: "Regression testing" },
+  { status: "Delivering", emoji: "📦", color: "#6A4C93", description: "Delivering to production" },
+  { status: "Done", emoji: "🎉", color: "#2DC653", description: "Completed" },
+];
+
+export const DOC_WORKFLOW: WorkflowStep[] = [
+  { status: "TO DO", emoji: "📋", color: "#8B9EB0", description: "To be started" },
+  { status: "Doing", emoji: "🔨", color: "#F4A261", description: "Actively working" },
+  { status: "Reviewing", emoji: "👀", color: "#2A9D8F", description: "Under review" },
+  { status: "Done", emoji: "🎉", color: "#2DC653", description: "Completed" },
+];
+
+/** Backward-compatible alias (defaults to Task workflow) */
+export const WORKFLOW = TASK_WORKFLOW;
+
+const ALL_WORKFLOWS = [TASK_WORKFLOW, EPIC_WORKFLOW, DOC_WORKFLOW];
+
+export function getWorkflowForType(issueType: string): WorkflowStep[] {
+  const t = (issueType ?? "").trim().toUpperCase();
+  if (t === "EPIC") return EPIC_WORKFLOW;
+  if (t === "DOC" || t === "DOCUMENT" || t === "DOCUMENTATION") return DOC_WORKFLOW;
+  return TASK_WORKFLOW;
+}
+
+export function isDocType(issueType: string): boolean {
+  const t = (issueType ?? "").trim().toUpperCase();
+  return t === "DOC" || t === "DOCUMENT" || t === "DOCUMENTATION";
+}
 
 const STATUS_ALIASES: Record<string, string> = {
   "TO DO": "WAITING",
@@ -57,34 +103,69 @@ export function normalizeStatus(status: string): string {
   return STATUS_ALIASES[upper] ?? upper;
 }
 
-export const WORKFLOW_MAP = new Map<string, WorkflowStep>(
-  WORKFLOW.map((step) => [normalizeStatus(step.status), step]),
-);
+/**
+ * Merged ordered list of all unique non-Done statuses across all workflows.
+ * Used by the status board to display sections in a logical order.
+ */
+export const ALL_BOARD_STATUSES: WorkflowStep[] = (() => {
+  const ordered: WorkflowStep[] = [
+    { status: "Waiting", emoji: "📋", color: "#8B9EB0", description: "Waiting to be started" },
+    { status: "Req. Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
+    { status: "Feasibility Study", emoji: "🔎", color: "#457B9D", description: "Feasibility analysis" },
+    { status: "PRD", emoji: "📄", color: "#1D3557", description: "Product requirements document" },
+    { status: "Tech Design", emoji: "🏗️", color: "#264653", description: "Technical design" },
+    { status: "Doing", emoji: "🔨", color: "#F4A261", description: "Actively in development" },
+    { status: "Developing", emoji: "💻", color: "#F4A261", description: "Actively in development" },
+    { status: "Integration", emoji: "🔗", color: "#E9C46A", description: "Integrating with other services" },
+    { status: "1ST REVIEW", emoji: "👀", color: "#2A9D8F", description: "First code review" },
+    { status: "Testing", emoji: "🧪", color: "#4361EE", description: "QA / manual testing" },
+    { status: "2ND REVIEW", emoji: "🔍", color: "#7209B7", description: "Second code review" },
+    { status: "Reviewing", emoji: "👀", color: "#2A9D8F", description: "Under review" },
+    { status: "UAT", emoji: "✅", color: "#3A86FF", description: "User acceptance testing" },
+    { status: "Staging", emoji: "🚀", color: "#FF6B6B", description: "Deployed to staging" },
+    { status: "Regression", emoji: "🔄", color: "#FB8500", description: "Regression testing" },
+    { status: "Delivering", emoji: "📦", color: "#6A4C93", description: "Delivering to production" },
+  ];
+  const seen = new Set<string>();
+  return ordered.filter((step) => {
+    const norm = normalizeStatus(step.status);
+    if (seen.has(norm)) return false;
+    seen.add(norm);
+    return true;
+  });
+})();
 
-export function getWorkflowStep(status: string): WorkflowStep | undefined {
-  return WORKFLOW_MAP.get(normalizeStatus(status));
+export function getWorkflowStep(status: string, issueType?: string): WorkflowStep | undefined {
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
+  const norm = normalizeStatus(status);
+  return workflow.find((s) => normalizeStatus(s.status) === norm);
 }
 
-export function getWorkflowIndex(status: string): number {
-  return WORKFLOW.findIndex((s) => normalizeStatus(s.status) === normalizeStatus(status));
+export function getWorkflowIndex(status: string, issueType?: string): number {
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
+  const norm = normalizeStatus(status);
+  return workflow.findIndex((s) => normalizeStatus(s.status) === norm);
 }
 
-export function getNextStatus(currentStatus: string): WorkflowStep | null {
-  const idx = getWorkflowIndex(currentStatus);
-  if (idx === -1 || idx >= WORKFLOW.length - 1) return null;
-  return WORKFLOW[idx + 1];
+export function getNextStatus(currentStatus: string, issueType?: string): WorkflowStep | null {
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
+  const idx = getWorkflowIndex(currentStatus, issueType);
+  if (idx === -1 || idx >= workflow.length - 1) return null;
+  return workflow[idx + 1];
 }
 
-export function getPreviousStatus(currentStatus: string): WorkflowStep | null {
-  const idx = getWorkflowIndex(currentStatus);
+export function getPreviousStatus(currentStatus: string, issueType?: string): WorkflowStep | null {
+  const idx = getWorkflowIndex(currentStatus, issueType);
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
   if (idx <= 0) return null;
-  return WORKFLOW[idx - 1];
+  return workflow[idx - 1];
 }
 
-export function getRemainingSteps(currentStatus: string): WorkflowStep[] {
-  const idx = getWorkflowIndex(currentStatus);
+export function getRemainingSteps(currentStatus: string, issueType?: string): WorkflowStep[] {
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
+  const idx = getWorkflowIndex(currentStatus, issueType);
   if (idx === -1) return [];
-  return WORKFLOW.slice(idx + 1);
+  return workflow.slice(idx + 1);
 }
 
 // ─── Jira CLI Helpers ─────────────────────────────────────────────────────────
@@ -189,6 +270,7 @@ interface JiraRawIssue {
     status?: { name?: string };
     assignee?: { displayName?: string; name?: string };
     priority?: { name?: string };
+    issuetype?: { name?: string };
     issueType?: { name?: string };
   };
 }
@@ -201,7 +283,7 @@ function mapRawIssue(raw: JiraRawIssue, fallbackKey?: string): JiraIssue {
     status: f.status?.name ?? "",
     assignee: f.assignee?.displayName ?? f.assignee?.name ?? "",
     priority: f.priority?.name ?? "",
-    type: f.issueType?.name ?? "",
+    type: f.issuetype?.name ?? f.issueType?.name ?? "",
   };
 }
 
@@ -235,13 +317,17 @@ export async function getIssueDetails(ticketKey: string): Promise<JiraIssue> {
 // ─── Issue List (JSON) ────────────────────────────────────────────────────────
 
 export async function getMyInProgressIssues(): Promise<JiraIssue[]> {
-  const aliasStatuses = Object.keys(STATUS_ALIASES).map((s) => `"${s}"`);
-  const statuses = [
-    ...WORKFLOW.filter((s) => s.status !== "Done").map((s) => `"${s.status}"`),
-    ...aliasStatuses,
-  ].join(", ");
+  const allNames = new Set<string>();
+  for (const wf of ALL_WORKFLOWS) {
+    for (const step of wf) {
+      if (step.status !== "Done") allNames.add(step.status);
+    }
+  }
+  for (const alias of Object.keys(STATUS_ALIASES)) {
+    allNames.add(alias);
+  }
+  const statuses = [...allNames].map((s) => `"${s}"`).join(", ");
 
-  // jira-cli wraps --jql in its own query, so ORDER BY must use the --order-by flag
   const jql = `assignee = currentUser() AND status in (${statuses})`;
 
   const stdout = await runJira(`issue list --jql '${jql}' --order-by updated --raw`);
@@ -531,6 +617,7 @@ const ROLE_STATUS_MAP: Record<string, "qa" | "reviewer"> = {
   TESTING: "qa",
   "1ST REVIEW": "reviewer",
   "2ND REVIEW": "reviewer",
+  REVIEWING: "reviewer",
 };
 
 const ROLE_FIELD_NAMES: Record<"qa" | "reviewer", string> = {

@@ -19,9 +19,11 @@ import {
   getPreviousStatus,
   getWorkflowStep,
   getWorkflowIndex,
+  getWorkflowForType,
+  normalizeStatus,
   autoFillDevDates,
   parseMissingFieldsFromError,
-  WORKFLOW,
+  isDocType,
   type JiraIssue,
   type WorkflowStep,
 } from "./utils";
@@ -104,13 +106,13 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
 
   async function advance() {
     if (!issue) return;
-    const next = getNextStatus(issue.status);
+    const next = getNextStatus(issue.status, issue.type);
     if (!next) {
       await showToast({ style: Toast.Style.Failure, title: "Already at final status" });
       return;
     }
 
-    if (next.status === "Done") {
+    if (next.status === "Done" && !isDocType(issue.type)) {
       const toast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
       try {
         const { filled, stillMissing } = await autoFillDevDates(issue.key);
@@ -142,7 +144,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
 
   async function regress() {
     if (!issue) return;
-    const prev = getPreviousStatus(issue.status);
+    const prev = getPreviousStatus(issue.status, issue.type);
     if (!prev) {
       await showToast({ style: Toast.Style.Failure, title: "Already at first status" });
       return;
@@ -216,16 +218,17 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
 
   if (!issue) return null;
 
-  const currentStep = getWorkflowStep(issue.status);
-  const nextStep = getNextStatus(issue.status);
-  const prevStep = getPreviousStatus(issue.status);
-  const currentIndex = getWorkflowIndex(issue.status);
-  const progress = currentIndex >= 0 ? Math.round((currentIndex / (WORKFLOW.length - 1)) * 100) : 0;
-  const progressBar = buildProgressBar(currentIndex, WORKFLOW.length);
+  const workflow = getWorkflowForType(issue.type);
+  const currentStep = getWorkflowStep(issue.status, issue.type);
+  const nextStep = getNextStatus(issue.status, issue.type);
+  const prevStep = getPreviousStatus(issue.status, issue.type);
+  const currentIndex = getWorkflowIndex(issue.status, issue.type);
+  const progress = currentIndex >= 0 ? Math.round((currentIndex / (workflow.length - 1)) * 100) : 0;
+  const progressBar = buildProgressBar(currentIndex, workflow.length);
 
   const markdown = done
-    ? buildDoneMarkdown(issue)
-    : buildAdvanceMarkdown(issue, currentStep, nextStep, prevStep, progressBar, progress);
+    ? buildDoneMarkdown(issue, workflow)
+    : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, prevStep, progressBar, progress);
 
   return (
     <Detail
@@ -242,7 +245,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
           <Detail.Metadata.Separator />
           <Detail.Metadata.Label
             title="Progress"
-            text={`${progress}% (step ${Math.max(currentIndex, 0) + 1} of ${WORKFLOW.length})`}
+            text={`${progress}% (step ${Math.max(currentIndex, 0) + 1} of ${workflow.length})`}
           />
           {nextStep && (
             <Detail.Metadata.Label title="Next Status" text={`${nextStep.emoji} ${nextStep.status}`} />
@@ -286,15 +289,17 @@ function buildProgressBar(currentIndex: number, total: number): string {
 
 function buildAdvanceMarkdown(
   issue: JiraIssue,
+  workflow: WorkflowStep[],
   currentStep: WorkflowStep | undefined,
   nextStep: WorkflowStep | null,
   prevStep: WorkflowStep | null,
   progressBar: string,
   progress: number,
 ): string {
-  const workflowTable = WORKFLOW.map((step, idx) => {
-    const isCurrent = step.status.toUpperCase() === issue.status.toUpperCase();
-    const isPast = idx < WORKFLOW.findIndex((s) => s.status.toUpperCase() === issue.status.toUpperCase());
+  const normStatus = normalizeStatus(issue.status);
+  const workflowTable = workflow.map((step, idx) => {
+    const isCurrent = normalizeStatus(step.status) === normStatus;
+    const isPast = idx < workflow.findIndex((s) => normalizeStatus(s.status) === normStatus);
     const marker = isCurrent ? "◀ **current**" : isPast ? "~~done~~" : "";
     return `| ${step.emoji} | ${isCurrent ? `**${step.status}**` : isPast ? `~~${step.status}~~` : step.status} | ${step.description} | ${marker} |`;
   }).join("\n");
@@ -310,7 +315,7 @@ function buildAdvanceMarkdown(
     .filter(Boolean)
     .join("\n\n");
 
-  return `# ${issue.key} — Advance Status
+  return `# ${issue.key} — Advance Status (${issue.type || "Task"})
 
 ## ${currentStep?.emoji ?? "🔘"} Current: ${issue.status}
 
@@ -329,7 +334,8 @@ ${workflowTable}
 `;
 }
 
-function buildDoneMarkdown(issue: JiraIssue): string {
+function buildDoneMarkdown(issue: JiraIssue, workflow: WorkflowStep[]): string {
+  const chain = workflow.map((s) => `${s.emoji} ${s.status}`).join(" → ");
   return `# ${issue.key} is Done!
 
 ## All stages complete
@@ -341,9 +347,7 @@ The ticket has been moved through the entire workflow and is now marked as **Don
 ---
 
 \`\`\`
-📋 Waiting/TO DO → 🔨 Doing → 🔗 Integration → 👀 1ST REVIEW
-  → 🧪 Testing → 🔍 2ND REVIEW → ✅ UAT
-  → 🚀 Staging → 🔄 Regression → 📦 Delivering → 🎉 Done
+${chain}
 \`\`\`
 `;
 }

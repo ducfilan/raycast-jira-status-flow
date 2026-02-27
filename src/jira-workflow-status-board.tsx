@@ -15,8 +15,6 @@ import {
   transitionIssue,
   getNextStatus,
   getPreviousStatus,
-  getWorkflowStep,
-  getWorkflowIndex,
   getRemainingSteps,
   normalizeStatus,
   autoFillDevDates,
@@ -27,7 +25,8 @@ import {
   getCommonAssignees,
   getCurrentUser,
   autoAssignForStatus,
-  WORKFLOW,
+  isDocType,
+  ALL_BOARD_STATUSES,
   type JiraIssue,
   type JiraUser,
 } from "./utils";
@@ -36,11 +35,17 @@ import MissingFieldsForm from "./missing-fields-form";
 const STATUS_COLORS: Record<string, Color> = {
   WAITING: Color.SecondaryText,
   "TO DO": Color.SecondaryText,
+  "REQ. GATHERING": Color.Blue,
+  "FEASIBILITY STUDY": Color.Blue,
+  PRD: Color.Purple,
+  "TECH DESIGN": Color.Purple,
   DOING: Color.Orange,
+  DEVELOPING: Color.Orange,
   INTEGRATION: Color.Yellow,
   "1ST REVIEW": Color.Green,
   TESTING: Color.Blue,
   "2ND REVIEW": Color.Purple,
+  REVIEWING: Color.Green,
   UAT: Color.Blue,
   STAGING: Color.Red,
   REGRESSION: Color.Orange,
@@ -257,7 +262,7 @@ export default function WorkflowStatusBoard() {
   }
 
   async function advanceIssue(issue: JiraIssue) {
-    const next = getNextStatus(issue.status);
+    const next = getNextStatus(issue.status, issue.type);
     if (!next) return;
 
     const doTransition = async () => {
@@ -288,7 +293,7 @@ export default function WorkflowStatusBoard() {
       }
     };
 
-    if (next.status === "Done") {
+    if (next.status === "Done" && !isDocType(issue.type)) {
       await ensureDevDatesAndRun(issue.key, doTransition);
     } else {
       await doTransition();
@@ -296,7 +301,7 @@ export default function WorkflowStatusBoard() {
   }
 
   async function regressIssue(issue: JiraIssue) {
-    const prev = getPreviousStatus(issue.status);
+    const prev = getPreviousStatus(issue.status, issue.type);
     if (!prev) return;
 
     const toast = await showToast({
@@ -327,7 +332,7 @@ export default function WorkflowStatusBoard() {
   }
 
   async function moveToDone(issue: JiraIssue) {
-    const remaining = getRemainingSteps(issue.status);
+    const remaining = getRemainingSteps(issue.status, issue.type);
     if (remaining.length === 0) return;
 
     const doTransitions = async () => {
@@ -373,18 +378,22 @@ export default function WorkflowStatusBoard() {
       toast.message = "Removed from board";
     };
 
-    // Pre-fill dev dates before attempting the full transition chain
-    await ensureDevDatesAndRun(issue.key, doTransitions);
+    if (isDocType(issue.type)) {
+      await doTransitions();
+    } else {
+      await ensureDevDatesAndRun(issue.key, doTransitions);
+    }
   }
 
-  const workflowStatuses = WORKFLOW.filter((s) => s.status !== "Done").map((s) => s.status);
+  const boardStatuses = ALL_BOARD_STATUSES;
+  const boardStatusNames = boardStatuses.map((s) => s.status);
 
-  const grouped = workflowStatuses.reduce<Record<string, JiraIssue[]>>((acc, status) => {
+  const grouped = boardStatusNames.reduce<Record<string, JiraIssue[]>>((acc, status) => {
     acc[status] = issues.filter((i) => normalizeStatus(i.status) === normalizeStatus(status));
     return acc;
   }, {});
 
-  const sectionedStatuses = workflowStatuses.filter(
+  const sectionedStatuses = boardStatusNames.filter(
     (s) => filter === "all" || s.toUpperCase() === filter.toUpperCase(),
   );
 
@@ -396,10 +405,9 @@ export default function WorkflowStatusBoard() {
         <List.Dropdown tooltip="Filter by status" onChange={setFilter}>
           <List.Dropdown.Item title="All In-Progress" value="all" />
           <List.Dropdown.Section title="Workflow Stages">
-            {workflowStatuses.map((s) => {
-              const step = getWorkflowStep(s)!;
-              return <List.Dropdown.Item key={s} title={`${step.emoji} ${s}`} value={s} />;
-            })}
+            {boardStatuses.map((step) => (
+              <List.Dropdown.Item key={step.status} title={`${step.emoji} ${step.status}`} value={step.status} />
+            ))}
           </List.Dropdown.Section>
         </List.Dropdown>
       }
@@ -417,21 +425,20 @@ export default function WorkflowStatusBoard() {
         const sectionIssues = grouped[statusName] || [];
         if (filter === "all" && sectionIssues.length === 0) return null;
 
-        const step = getWorkflowStep(statusName)!;
-        const idx = getWorkflowIndex(statusName);
+        const step = boardStatuses.find((s) => s.status === statusName)!;
 
         return (
           <List.Section
             key={statusName}
             title={`${step.emoji} ${statusName}`}
-            subtitle={`${sectionIssues.length} ticket${sectionIssues.length !== 1 ? "s" : ""} · step ${idx + 1}/${WORKFLOW.length}`}
+            subtitle={`${sectionIssues.length} ticket${sectionIssues.length !== 1 ? "s" : ""}`}
           >
             {sectionIssues.map((issue) => {
-              const next = getNextStatus(issue.status);
-              const remaining = getRemainingSteps(issue.status).length;
-              const color = STATUS_COLORS[issue.status.toUpperCase()] ?? Color.PrimaryText;
+              const next = getNextStatus(issue.status, issue.type);
+              const remaining = getRemainingSteps(issue.status, issue.type).length;
+              const color = STATUS_COLORS[normalizeStatus(issue.status)] ?? STATUS_COLORS[issue.status.toUpperCase()] ?? Color.PrimaryText;
 
-              const prev = getPreviousStatus(issue.status);
+              const prev = getPreviousStatus(issue.status, issue.type);
 
               return (
                 <List.Item
