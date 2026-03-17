@@ -35,7 +35,7 @@ import MissingFieldsForm from "./missing-fields-form";
 const STATUS_COLORS: Record<string, Color> = {
   WAITING: Color.SecondaryText,
   "TO DO": Color.SecondaryText,
-  "REQ. GATHERING": Color.Blue,
+  "REQ.GATHERING": Color.Blue,
   "FEASIBILITY STUDY": Color.Blue,
   PRD: Color.Purple,
   "TECH DESIGN": Color.Purple,
@@ -53,13 +53,7 @@ const STATUS_COLORS: Record<string, Color> = {
   DONE: Color.Green,
 };
 
-function AssigneeForm({
-  issueKey,
-  onAssigned,
-}: {
-  issueKey: string;
-  onAssigned: (assigneeName: string) => void;
-}) {
+function AssigneeForm({ issueKey, onAssigned }: { issueKey: string; onAssigned: (assigneeName: string) => void }) {
   const { pop } = useNavigation();
   const [query, setQuery] = useState("");
   const [users, setUsers] = useState<JiraUser[]>([]);
@@ -184,10 +178,7 @@ function AssigneeForm({
               icon={Icon.Person}
               actions={
                 <ActionPanel>
-                  <Action
-                    title={`Assign to ${u.displayName}`}
-                    onAction={() => handleAssign(u)}
-                  />
+                  <Action title={`Assign to ${u.displayName}`} onAction={() => handleAssign(u)} />
                 </ActionPanel>
               }
             />
@@ -282,10 +273,14 @@ export default function WorkflowStatusBoard() {
         try {
           const result = await autoAssignForStatus(issue.key, next.status);
           if (result.assigned) {
-            setIssues((prev) => prev.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)));
+            setIssues((prev) =>
+              prev.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)),
+            );
             toast.message = `${next.emoji} ${next.status} → ${result.displayName}`;
           }
-        } catch { /* auto-assign is best-effort */ }
+        } catch {
+          /* auto-assign is best-effort */
+        }
       } catch (e: unknown) {
         toast.style = Toast.Style.Failure;
         toast.title = "Transition failed";
@@ -320,10 +315,14 @@ export default function WorkflowStatusBoard() {
       try {
         const result = await autoAssignForStatus(issue.key, prev.status);
         if (result.assigned) {
-          setIssues((prev_) => prev_.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)));
+          setIssues((prev_) =>
+            prev_.map((i) => (i.key === issue.key ? { ...i, assignee: result.displayName ?? "" } : i)),
+          );
           toast.message = `${prev.emoji} ${prev.status} → ${result.displayName}`;
         }
-      } catch { /* auto-assign is best-effort */ }
+      } catch {
+        /* auto-assign is best-effort */
+      }
     } catch (e: unknown) {
       toast.style = Toast.Style.Failure;
       toast.title = "Transition failed";
@@ -347,7 +346,11 @@ export default function WorkflowStatusBoard() {
         try {
           await transitionIssue(issue.key, step.status);
           current = step.status;
-          try { await autoAssignForStatus(issue.key, step.status); } catch { /* best-effort */ }
+          try {
+            await autoAssignForStatus(issue.key, step.status);
+          } catch {
+            /* best-effort */
+          }
           await new Promise((r) => setTimeout(r, 600));
         } catch (e: unknown) {
           toast.style = Toast.Style.Failure;
@@ -436,7 +439,10 @@ export default function WorkflowStatusBoard() {
             {sectionIssues.map((issue) => {
               const next = getNextStatus(issue.status, issue.type);
               const remaining = getRemainingSteps(issue.status, issue.type).length;
-              const color = STATUS_COLORS[normalizeStatus(issue.status)] ?? STATUS_COLORS[issue.status.toUpperCase()] ?? Color.PrimaryText;
+              const color =
+                STATUS_COLORS[normalizeStatus(issue.status)] ??
+                STATUS_COLORS[issue.status.toUpperCase()] ??
+                Color.PrimaryText;
 
               const prev = getPreviousStatus(issue.status, issue.type);
 
@@ -509,11 +515,7 @@ export default function WorkflowStatusBoard() {
                         <Action.CopyToClipboard title="Copy Summary" content={issue.summary} />
                       </ActionPanel.Section>
                       <ActionPanel.Section>
-                        <Action
-                          title="Refresh Board"
-                          onAction={load}
-                          shortcut={{ modifiers: ["cmd"], key: "r" }}
-                        />
+                        <Action title="Refresh Board" onAction={load} shortcut={{ modifiers: ["cmd"], key: "r" }} />
                         <Action title="Open Preferences" onAction={openExtensionPreferences} />
                       </ActionPanel.Section>
                     </ActionPanel>
