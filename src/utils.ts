@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 export type WorkflowStatus =
   | "Waiting"
   | "TO DO"
-  | "Req. Gathering"
+  | "Req.Gathering"
   | "Feasibility Study"
   | "PRD"
   | "Tech Design"
@@ -50,7 +50,7 @@ export const TASK_WORKFLOW: WorkflowStep[] = [
 
 export const EPIC_WORKFLOW: WorkflowStep[] = [
   { status: "Waiting", emoji: "📋", color: "#8B9EB0", description: "Waiting to be started" },
-  { status: "Req. Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
+  { status: "Req.Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
   { status: "Feasibility Study", emoji: "🔎", color: "#457B9D", description: "Feasibility analysis" },
   { status: "PRD", emoji: "📄", color: "#1D3557", description: "Product requirements document" },
   { status: "Tech Design", emoji: "🏗️", color: "#264653", description: "Technical design" },
@@ -73,8 +73,6 @@ export const DOC_WORKFLOW: WorkflowStep[] = [
 
 /** Backward-compatible alias (defaults to Task workflow) */
 export const WORKFLOW = TASK_WORKFLOW;
-
-const ALL_WORKFLOWS = [TASK_WORKFLOW, EPIC_WORKFLOW, DOC_WORKFLOW];
 
 export function getWorkflowForType(issueType: string): WorkflowStep[] {
   const t = (issueType ?? "").trim().toUpperCase();
@@ -110,7 +108,7 @@ export function normalizeStatus(status: string): string {
 export const ALL_BOARD_STATUSES: WorkflowStep[] = (() => {
   const ordered: WorkflowStep[] = [
     { status: "Waiting", emoji: "📋", color: "#8B9EB0", description: "Waiting to be started" },
-    { status: "Req. Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
+    { status: "Req.Gathering", emoji: "📝", color: "#A8DADC", description: "Requirements gathering" },
     { status: "Feasibility Study", emoji: "🔎", color: "#457B9D", description: "Feasibility analysis" },
     { status: "PRD", emoji: "📄", color: "#1D3557", description: "Product requirements document" },
     { status: "Tech Design", emoji: "🏗️", color: "#264653", description: "Technical design" },
@@ -214,7 +212,9 @@ async function runJira(args: string): Promise<string> {
     });
     return stdout;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    let msg = err instanceof Error ? err.message : String(err);
+    // Strip the noisy "Command failed: ..." prefix that contains the full command string
+    msg = msg.replace(/^Command failed: [^\n]+\n/, "");
     // Strip ANSI escape codes from error messages
     // eslint-disable-next-line no-control-regex
     const clean = msg.replaceAll(/\u001b\[[0-9;]*m/g, "");
@@ -306,9 +306,7 @@ export async function getIssueDetails(ticketKey: string): Promise<JiraIssue> {
 
   const issue = mapRawIssue(parsed, ticketKey);
   if (!issue.status) {
-    throw new Error(
-      `Could not determine status for ${ticketKey}.\n\nRaw output:\n${stdout.slice(0, 500)}`,
-    );
+    throw new Error(`Could not determine status for ${ticketKey}.\n\nRaw output:\n${stdout.slice(0, 500)}`);
   }
 
   return issue;
@@ -317,18 +315,10 @@ export async function getIssueDetails(ticketKey: string): Promise<JiraIssue> {
 // ─── Issue List (JSON) ────────────────────────────────────────────────────────
 
 export async function getMyInProgressIssues(): Promise<JiraIssue[]> {
-  const allNames = new Set<string>();
-  for (const wf of ALL_WORKFLOWS) {
-    for (const step of wf) {
-      if (step.status !== "Done") allNames.add(step.status);
-    }
-  }
-  for (const alias of Object.keys(STATUS_ALIASES)) {
-    allNames.add(alias);
-  }
-  const statuses = [...allNames].map((s) => `"${s}"`).join(", ");
-
-  const jql = `assignee = currentUser() AND status in (${statuses})`;
+  // Using 'resolution = Unresolved' instead of hardcoding statuses in the JQL.
+  // This prevents Jira API errors if a specific workflow status doesn't exist
+  // in the user's Jira instance. Unrelated statuses are filtered out by the board.
+  const jql = `assignee = currentUser() AND resolution = Unresolved`;
 
   const stdout = await runJira(`issue list --jql '${jql}' --order-by updated --raw`);
   return parseIssueListJson(stdout);
@@ -346,7 +336,12 @@ function parseIssueListJson(output: string): JiraIssue[] {
   let items: JiraRawIssue[];
   if (Array.isArray(parsed)) {
     items = parsed;
-  } else if (parsed && typeof parsed === "object" && "issues" in parsed && Array.isArray((parsed as { issues: unknown }).issues)) {
+  } else if (
+    parsed &&
+    typeof parsed === "object" &&
+    "issues" in parsed &&
+    Array.isArray((parsed as { issues: unknown }).issues)
+  ) {
     items = (parsed as { issues: JiraRawIssue[] }).issues;
   } else {
     return [];
@@ -430,10 +425,7 @@ export const DEV_DATE_FIELDS = {
   plannedDue: { name: "Planned Dev Due Date", id: "customfield_11509" },
 };
 
-export async function getIssueRawFields(
-  ticketKey: string,
-  fieldIds: string[],
-): Promise<Record<string, string | null>> {
+export async function getIssueRawFields(ticketKey: string, fieldIds: string[]): Promise<Record<string, string | null>> {
   const stdout = await runJira(`issue view ${ticketKey} --raw`);
 
   let parsed: { fields?: Record<string, unknown> };
@@ -452,7 +444,12 @@ export async function getIssueRawFields(
     const val = fields[id];
     if (typeof val === "string") {
       result[id] = val;
-    } else if (val && typeof val === "object" && "value" in (val as Record<string, unknown>) && typeof (val as Record<string, unknown>).value === "string") {
+    } else if (
+      val &&
+      typeof val === "object" &&
+      "value" in (val as Record<string, unknown>) &&
+      typeof (val as Record<string, unknown>).value === "string"
+    ) {
       result[id] = (val as Record<string, string>).value;
     } else {
       result[id] = null;
@@ -506,10 +503,7 @@ async function resolveFieldId(fieldName: string): Promise<string | null> {
   return cachedFieldMap[fieldName] ?? null;
 }
 
-export async function setIssueCustomFields(
-  ticketKey: string,
-  fields: Record<string, string>,
-): Promise<void> {
+export async function setIssueCustomFields(ticketKey: string, fields: Record<string, string>): Promise<void> {
   const auth = getJiraAuth();
 
   const fieldData: Record<string, string> = {};
@@ -523,12 +517,18 @@ export async function setIssueCustomFields(
   const { stdout } = await execFileAsync(
     "curl",
     [
-      "-s", "-w", "\n%{http_code}",
-      "-X", "PUT",
+      "-s",
+      "-w",
+      "\n%{http_code}",
+      "-X",
+      "PUT",
       `${auth.server}/rest/api/2/issue/${ticketKey}`,
-      "-H", `Authorization: Bearer ${auth.token}`,
-      "-H", "Content-Type: application/json",
-      "-d", body,
+      "-H",
+      `Authorization: Bearer ${auth.token}`,
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      body,
     ],
     { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
   );
@@ -545,9 +545,7 @@ export async function setIssueCustomFields(
  * Auto-fill Dev Start/Due Date from their Planned counterparts.
  * Returns which fields were filled and which are still missing.
  */
-export async function autoFillDevDates(
-  ticketKey: string,
-): Promise<{ filled: string[]; stillMissing: string[] }> {
+export async function autoFillDevDates(ticketKey: string): Promise<{ filled: string[]; stillMissing: string[] }> {
   const allIds = [
     DEV_DATE_FIELDS.devStartDate.id,
     DEV_DATE_FIELDS.devDueDate.id,
@@ -650,7 +648,7 @@ async function getIssueFieldUser(ticketKey: string, fieldName: string): Promise<
 
   return {
     accountId: typeof user.accountId === "string" ? user.accountId : undefined,
-    name: typeof user.name === "string" ? user.name : (typeof user.key === "string" ? user.key as string : undefined),
+    name: typeof user.name === "string" ? user.name : typeof user.key === "string" ? (user.key as string) : undefined,
     displayName:
       (typeof user.displayName === "string" ? user.displayName : undefined) ??
       (typeof user.name === "string" ? user.name : undefined) ??
@@ -696,11 +694,10 @@ export interface JiraUser {
 }
 
 async function fetchJiraUsers(url: string, token: string): Promise<JiraUser[]> {
-  const { stdout } = await execFileAsync(
-    "curl",
-    ["-s", url, "-H", `Authorization: Bearer ${token}`],
-    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
-  );
+  const { stdout } = await execFileAsync("curl", ["-s", url, "-H", `Authorization: Bearer ${token}`], {
+    env: shellEnv(),
+    maxBuffer: 10 * 1024 * 1024,
+  });
 
   let parsed: unknown;
   try {
@@ -710,7 +707,9 @@ async function fetchJiraUsers(url: string, token: string): Promise<JiraUser[]> {
   }
 
   if (!Array.isArray(parsed)) return [];
-  return (parsed as Array<{ accountId?: string; name?: string; key?: string; displayName?: string; emailAddress?: string }>)
+  return (
+    parsed as Array<{ accountId?: string; name?: string; key?: string; displayName?: string; emailAddress?: string }>
+  )
     .filter((u) => u.accountId || u.name || u.key)
     .map((u) => ({
       accountId: u.accountId,
@@ -728,7 +727,13 @@ export async function getCurrentUser(): Promise<JiraUser> {
     { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
   );
 
-  const u = JSON.parse(stdout) as { accountId?: string; name?: string; key?: string; displayName?: string; emailAddress?: string };
+  const u = JSON.parse(stdout) as {
+    accountId?: string;
+    name?: string;
+    key?: string;
+    displayName?: string;
+    emailAddress?: string;
+  };
   return {
     accountId: u.accountId,
     name: u.name ?? u.key,
@@ -748,10 +753,7 @@ export async function searchJiraUser(query: string): Promise<JiraUser[]> {
   );
   if (serverResults.length > 0) return serverResults;
 
-  return fetchJiraUsers(
-    `${auth.server}/rest/api/2/user/search?query=${encoded}&maxResults=10`,
-    auth.token,
-  );
+  return fetchJiraUsers(`${auth.server}/rest/api/2/user/search?query=${encoded}&maxResults=10`, auth.token);
 }
 
 export async function assignIssue(ticketKey: string, user: JiraUser): Promise<void> {
@@ -760,12 +762,18 @@ export async function assignIssue(ticketKey: string, user: JiraUser): Promise<vo
   const { stdout } = await execFileAsync(
     "curl",
     [
-      "-s", "-w", "\n%{http_code}",
-      "-X", "PUT",
+      "-s",
+      "-w",
+      "\n%{http_code}",
+      "-X",
+      "PUT",
       `${auth.server}/rest/api/2/issue/${ticketKey}/assignee`,
-      "-H", `Authorization: Bearer ${auth.token}`,
-      "-H", "Content-Type: application/json",
-      "-d", body,
+      "-H",
+      `Authorization: Bearer ${auth.token}`,
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      body,
     ],
     { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
   );

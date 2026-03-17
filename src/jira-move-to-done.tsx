@@ -207,7 +207,7 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
         actions={
           <ActionPanel>
             <Action.SubmitForm
-              title="Look Up Ticket"
+              title="Look up Ticket"
               onSubmit={(values: { ticketKey: string }) => load(values.ticketKey)}
             />
           </ActionPanel>

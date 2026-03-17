@@ -3,6 +3,7 @@ import {
   Action,
   Detail,
   Form,
+  List,
   showToast,
   Toast,
   Clipboard,
@@ -16,7 +17,6 @@ import {
   getIssueDetails,
   transitionIssue,
   getNextStatus,
-  getPreviousStatus,
   getWorkflowStep,
   getWorkflowIndex,
   getWorkflowForType,
@@ -104,15 +104,10 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
     }
   }
 
-  async function advance() {
+  async function handleTransition(targetStep: WorkflowStep) {
     if (!issue) return;
-    const next = getNextStatus(issue.status, issue.type);
-    if (!next) {
-      await showToast({ style: Toast.Style.Failure, title: "Already at final status" });
-      return;
-    }
 
-    if (next.status === "Done" && !isDocType(issue.type)) {
+    if (targetStep.status === "Done" && !isDocType(issue.type)) {
       const toast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
       try {
         const { filled, stillMissing } = await autoFillDevDates(issue.key);
@@ -127,7 +122,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
             <MissingFieldsForm
               issueKey={issue.key}
               missingFields={stillMissing}
-              onComplete={() => doTransition(issue, next)}
+              onComplete={() => doTransition(issue, targetStep)}
             />,
           );
           return;
@@ -139,40 +134,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
       }
     }
 
-    await doTransition(issue, next);
-  }
-
-  async function regress() {
-    if (!issue) return;
-    const prev = getPreviousStatus(issue.status, issue.type);
-    if (!prev) {
-      await showToast({ style: Toast.Style.Failure, title: "Already at first status" });
-      return;
-    }
-
-    setTransitioning(true);
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: `Moving ${issue.key} back`,
-      message: `${issue.status} → ${prev.status}`,
-    });
-
-    try {
-      await transitionIssue(issue.key, prev.status);
-      const updatedIssue = { ...issue, status: prev.status };
-      setIssue(updatedIssue);
-      setDone(false);
-      toast.style = Toast.Style.Success;
-      toast.title = `${issue.key} moved back`;
-      toast.message = `${prev.emoji} ${prev.status}`;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      toast.style = Toast.Style.Failure;
-      toast.title = "Transition failed";
-      toast.message = msg;
-    } finally {
-      setTransitioning(false);
-    }
+    await doTransition(issue, targetStep);
   }
 
   if (needsTicketInput) {
@@ -193,12 +155,14 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
     );
   }
 
-  if (loading) {
+  if (loading && !issue) {
     return (
-      <Detail
-        isLoading
-        markdown={`# Fetching ticket...\n\nResolving ${props.arguments.ticketKey || "from clipboard"}…`}
-      />
+      <List isLoading>
+        <List.EmptyView
+          title="Fetching ticket..."
+          description={`Resolving ${props.arguments.ticketKey || "from clipboard"}…`}
+        />
+      </List>
     );
   }
 
@@ -209,7 +173,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
         actions={
           <ActionPanel>
             <Action title="Open Preferences" onAction={openExtensionPreferences} />
-            <Action title="Retry" onAction={load} />
+            <Action title="Retry" onAction={() => load()} />
           </ActionPanel>
         }
       />
@@ -221,63 +185,82 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   const workflow = getWorkflowForType(issue.type);
   const currentStep = getWorkflowStep(issue.status, issue.type);
   const nextStep = getNextStatus(issue.status, issue.type);
-  const prevStep = getPreviousStatus(issue.status, issue.type);
   const currentIndex = getWorkflowIndex(issue.status, issue.type);
   const progress = currentIndex >= 0 ? Math.round((currentIndex / (workflow.length - 1)) * 100) : 0;
   const progressBar = buildProgressBar(currentIndex, workflow.length);
 
   const markdown = done
     ? buildDoneMarkdown(issue, workflow)
-    : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, prevStep, progressBar, progress);
+    : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, progressBar, progress);
+
+  const metadata = (
+    <List.Item.Detail.Metadata>
+      <List.Item.Detail.Metadata.Label title="Ticket" text={issue.key} />
+      <List.Item.Detail.Metadata.Label title="Summary" text={issue.summary || "—"} />
+      <List.Item.Detail.Metadata.Label title="Status" text={`${currentStep?.emoji ?? ""} ${issue.status}`} />
+      <List.Item.Detail.Metadata.Label title="Assignee" text={issue.assignee || "Unassigned"} />
+      <List.Item.Detail.Metadata.Label title="Priority" text={issue.priority || "—"} />
+      <List.Item.Detail.Metadata.Label title="Type" text={issue.type || "—"} />
+      <List.Item.Detail.Metadata.Separator />
+      <List.Item.Detail.Metadata.Label
+        title="Progress"
+        text={`${progress}% (step ${Math.max(currentIndex, 0) + 1} of ${workflow.length})`}
+      />
+      {nextStep && (
+        <List.Item.Detail.Metadata.Label title="Next Status" text={`${nextStep.emoji} ${nextStep.status}`} />
+      )}
+    </List.Item.Detail.Metadata>
+  );
 
   return (
-    <Detail
-      isLoading={transitioning}
-      markdown={markdown}
-      metadata={
-        <Detail.Metadata>
-          <Detail.Metadata.Label title="Ticket" text={issue.key} />
-          <Detail.Metadata.Label title="Summary" text={issue.summary || "—"} />
-          <Detail.Metadata.Label title="Status" text={`${currentStep?.emoji ?? ""} ${issue.status}`} />
-          <Detail.Metadata.Label title="Assignee" text={issue.assignee || "Unassigned"} />
-          <Detail.Metadata.Label title="Priority" text={issue.priority || "—"} />
-          <Detail.Metadata.Label title="Type" text={issue.type || "—"} />
-          <Detail.Metadata.Separator />
-          <Detail.Metadata.Label
-            title="Progress"
-            text={`${progress}% (step ${Math.max(currentIndex, 0) + 1} of ${workflow.length})`}
+    <List isLoading={transitioning} isShowingDetail>
+      {nextStep && (
+        <List.Item
+          title={`Next: ${nextStep.status}`}
+          icon={nextStep.emoji}
+          subtitle={nextStep.description}
+          detail={<List.Item.Detail markdown={markdown} metadata={metadata} />}
+          actions={
+            <ActionPanel>
+              <Action title={`Advance to ${nextStep.status}`} onAction={() => handleTransition(nextStep)} />
+              <Action
+                title="Copy Ticket Key"
+                shortcut={{ modifiers: ["cmd"], key: "c" }}
+                onAction={() => Clipboard.copy(issue.key)}
+              />
+              <Action title="Reload" shortcut={{ modifiers: ["cmd"], key: "r" }} onAction={() => load()} />
+              <Action title="Open Preferences" onAction={openExtensionPreferences} />
+            </ActionPanel>
+          }
+        />
+      )}
+      {workflow.map((step) => {
+        if (step.status === nextStep?.status) return null;
+        if (normalizeStatus(step.status) === normalizeStatus(issue.status)) return null;
+
+        return (
+          <List.Item
+            key={step.status}
+            title={step.status}
+            icon={step.emoji}
+            subtitle={step.description}
+            detail={<List.Item.Detail markdown={markdown} metadata={metadata} />}
+            actions={
+              <ActionPanel>
+                <Action title={`Move to ${step.status}`} onAction={() => handleTransition(step)} />
+                <Action
+                  title="Copy Ticket Key"
+                  shortcut={{ modifiers: ["cmd"], key: "c" }}
+                  onAction={() => Clipboard.copy(issue.key)}
+                />
+                <Action title="Reload" shortcut={{ modifiers: ["cmd"], key: "r" }} onAction={() => load()} />
+                <Action title="Open Preferences" onAction={openExtensionPreferences} />
+              </ActionPanel>
+            }
           />
-          {nextStep && (
-            <Detail.Metadata.Label title="Next Status" text={`${nextStep.emoji} ${nextStep.status}`} />
-          )}
-        </Detail.Metadata>
-      }
-      actions={
-        <ActionPanel>
-          {!done && nextStep && (
-            <Action
-              title={`Advance to ${nextStep.status}`}
-              shortcut={{ modifiers: ["cmd"], key: "return" }}
-              onAction={advance}
-            />
-          )}
-          {prevStep && (
-            <Action
-              title={`Move Back to ${prevStep.status}`}
-              shortcut={{ modifiers: ["cmd"], key: "backspace" }}
-              onAction={regress}
-            />
-          )}
-          <Action
-            title="Copy Ticket Key"
-            shortcut={{ modifiers: ["cmd"], key: "c" }}
-            onAction={() => Clipboard.copy(issue.key)}
-          />
-          <Action title="Reload" shortcut={{ modifiers: ["cmd"], key: "r" }} onAction={load} />
-          <Action title="Open Preferences" onAction={openExtensionPreferences} />
-        </ActionPanel>
-      }
-    />
+        );
+      })}
+    </List>
   );
 }
 
@@ -292,25 +275,23 @@ function buildAdvanceMarkdown(
   workflow: WorkflowStep[],
   currentStep: WorkflowStep | undefined,
   nextStep: WorkflowStep | null,
-  prevStep: WorkflowStep | null,
   progressBar: string,
   progress: number,
 ): string {
   const normStatus = normalizeStatus(issue.status);
-  const workflowTable = workflow.map((step, idx) => {
-    const isCurrent = normalizeStatus(step.status) === normStatus;
-    const isPast = idx < workflow.findIndex((s) => normalizeStatus(s.status) === normStatus);
-    const marker = isCurrent ? "◀ **current**" : isPast ? "~~done~~" : "";
-    return `| ${step.emoji} | ${isCurrent ? `**${step.status}**` : isPast ? `~~${step.status}~~` : step.status} | ${step.description} | ${marker} |`;
-  }).join("\n");
+  const workflowTable = workflow
+    .map((step, idx) => {
+      const isCurrent = normalizeStatus(step.status) === normStatus;
+      const isPast = idx < workflow.findIndex((s) => normalizeStatus(s.status) === normStatus);
+      const marker = isCurrent ? "◀ **current**" : isPast ? "~~done~~" : "";
+      return `| ${step.emoji} | ${isCurrent ? `**${step.status}**` : isPast ? `~~${step.status}~~` : step.status} | ${step.description} | ${marker} |`;
+    })
+    .join("\n");
 
   const hints = [
     nextStep
-      ? `> Press **⌘ + Return** to advance to **${nextStep.emoji} ${nextStep.status}**\n> ${nextStep.description}`
+      ? `> Select **Next: ${nextStep.status}** to advance.\n> ${nextStep.description}`
       : `> This ticket is already at the final stage!`,
-    prevStep
-      ? `> Press **⌘ + ⌫** to move back to **${prevStep.emoji} ${prevStep.status}**`
-      : null,
   ]
     .filter(Boolean)
     .join("\n\n");

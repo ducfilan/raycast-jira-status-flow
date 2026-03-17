@@ -17,8 +17,8 @@
   "commands": [
     {
       "name": "jira-advance-to-next-status",
-      "title": "Jira: Advance to Next Status",
-      "description": "Advance a Jira ticket to its next workflow status",
+      "title": "Jira: Advance to Status",
+      "description": "Advance a Jira ticket to a workflow status",
       "mode": "view",
       "arguments": [
         {
