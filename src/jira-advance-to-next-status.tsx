@@ -10,6 +10,8 @@ import {
   openExtensionPreferences,
   LaunchProps,
   useNavigation,
+  closeMainWindow,
+  open,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
@@ -20,10 +22,12 @@ import {
   getWorkflowStep,
   getWorkflowIndex,
   getWorkflowForType,
+  getTransitionPathToTarget,
   normalizeStatus,
   autoFillDevDates,
   parseMissingFieldsFromError,
   isDocType,
+  getJiraIssueBrowseUrl,
   type JiraIssue,
   type WorkflowStep,
 } from "./utils";
@@ -33,8 +37,6 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   const [issue, setIssue] = useState<JiraIssue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [transitioning, setTransitioning] = useState(false);
-  const [done, setDone] = useState(false);
   const [needsTicketInput, setNeedsTicketInput] = useState(false);
   const { push } = useNavigation();
 
@@ -65,76 +67,102 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
     }
   }
 
-  async function doTransition(issueData: JiraIssue, next: WorkflowStep) {
-    setTransitioning(true);
+  async function runChainedTransitions(startIssue: JiraIssue, path: WorkflowStep[]) {
+    if (path.length === 0) return;
+
+    await closeMainWindow({ clearRootSearch: true });
+
     const toast = await showToast({
       style: Toast.Style.Animated,
-      title: `Moving ${issueData.key}`,
-      message: `${issueData.status} → ${next.status}`,
+      title: `Moving ${startIssue.key}`,
+      message: `0/${path.length} — ${startIssue.status}`,
     });
 
-    try {
-      await transitionIssue(issueData.key, next.status);
-      const updatedIssue = { ...issueData, status: next.status };
-      setIssue(updatedIssue);
-      setDone(next.status === "Done");
-      toast.style = Toast.Style.Success;
-      toast.title = `${issueData.key} advanced!`;
-      toast.message = `Now: ${next.emoji} ${next.status}`;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      toast.style = Toast.Style.Failure;
-      toast.title = "Transition failed";
+    let current = startIssue;
 
-      const missingFields = parseMissingFieldsFromError(msg);
-      if (missingFields.length > 0) {
-        toast.hide();
-        push(
-          <MissingFieldsForm
-            issueKey={issueData.key}
-            missingFields={missingFields}
-            onComplete={() => doTransition(issueData, next)}
-          />,
-        );
-      } else {
+    for (let i = 0; i < path.length; i++) {
+      const next = path[i];
+      toast.message = `${i + 1}/${path.length}: ${current.status} → ${next.status}`;
+
+      try {
+        await transitionIssue(current.key, next.status);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const missingFields = parseMissingFieldsFromError(msg);
+        if (missingFields.length > 0) {
+          toast.hide();
+          await showToast({
+            style: Toast.Style.Failure,
+            title: `${current.key}: required fields`,
+            message: "Opening issue in browser — fill fields and run the command again.",
+          });
+          await open(getJiraIssueBrowseUrl(current.key));
+          return;
+        }
+        toast.style = Toast.Style.Failure;
+        toast.title = "Transition failed";
         toast.message = msg;
+        return;
       }
-    } finally {
-      setTransitioning(false);
+
+      current = { ...current, status: next.status };
     }
+
+    const last = path.at(-1)!;
+    toast.style = Toast.Style.Success;
+    toast.title = `${startIssue.key} → ${last.status}`;
+    toast.message =
+      path.length > 1 ? `${path.length} steps — now ${last.emoji} ${last.status}` : `Now: ${last.emoji} ${last.status}`;
   }
 
   async function handleTransition(targetStep: WorkflowStep) {
     if (!issue) return;
 
-    if (targetStep.status === "Done" && !isDocType(issue.type)) {
-      const toast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
+    const path = getTransitionPathToTarget(issue.status, targetStep.status, issue.type);
+    if (!path) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Unknown status",
+        message: `"${issue.status}" or "${targetStep.status}" is not in this issue's workflow.`,
+      });
+      return;
+    }
+    if (path.length === 0) {
+      await showToast({ style: Toast.Style.Failure, title: "Already at that status" });
+      return;
+    }
+
+    const finalIsDone = path.at(-1)?.status === "Done";
+    if (finalIsDone && !isDocType(issue.type)) {
+      const preToast = await showToast({ style: Toast.Style.Animated, title: "Checking required fields…" });
       try {
         const { filled, stillMissing } = await autoFillDevDates(issue.key);
         if (filled.length > 0) {
-          toast.title = "Auto-filled dates";
-          toast.message = filled.join(", ");
+          preToast.title = "Auto-filled dates";
+          preToast.message = filled.join(", ");
         }
-        toast.hide();
+        preToast.hide();
 
         if (stillMissing.length > 0) {
           push(
             <MissingFieldsForm
               issueKey={issue.key}
               missingFields={stillMissing}
-              onComplete={() => doTransition(issue, targetStep)}
+              onComplete={() => {
+                void runChainedTransitions(issue, path);
+              }}
             />,
           );
           return;
         }
       } catch (e: unknown) {
-        toast.style = Toast.Style.Failure;
-        toast.title = "Auto-fill failed, continuing…";
-        toast.message = e instanceof Error ? e.message : String(e);
+        preToast.style = Toast.Style.Failure;
+        preToast.title = "Auto-fill failed, continuing…";
+        preToast.message = e instanceof Error ? e.message : String(e);
       }
     }
 
-    await doTransition(issue, targetStep);
+    await runChainedTransitions(issue, path);
   }
 
   if (needsTicketInput) {
@@ -189,7 +217,8 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   const progress = currentIndex >= 0 ? Math.round((currentIndex / (workflow.length - 1)) * 100) : 0;
   const progressBar = buildProgressBar(currentIndex, workflow.length);
 
-  const markdown = done
+  const isDoneUi = normalizeStatus(issue.status) === normalizeStatus("Done");
+  const markdown = isDoneUi
     ? buildDoneMarkdown(issue, workflow)
     : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, progressBar, progress);
 
@@ -213,7 +242,7 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   );
 
   return (
-    <List isLoading={transitioning} isShowingDetail>
+    <List isShowingDetail>
       {nextStep && (
         <List.Item
           title={`Next: ${nextStep.status}`}
@@ -238,12 +267,15 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
         if (step.status === nextStep?.status) return null;
         if (normalizeStatus(step.status) === normalizeStatus(issue.status)) return null;
 
+        const hopCount = getTransitionPathToTarget(issue.status, step.status, issue.type)?.length ?? 0;
+        const subtitle = hopCount > 1 ? `${step.description} · ${hopCount} steps` : step.description;
+
         return (
           <List.Item
             key={step.status}
             title={step.status}
             icon={step.emoji}
-            subtitle={step.description}
+            subtitle={subtitle}
             detail={<List.Item.Detail markdown={markdown} metadata={metadata} />}
             actions={
               <ActionPanel>
@@ -290,7 +322,7 @@ function buildAdvanceMarkdown(
 
   const hints = [
     nextStep
-      ? `> Select **Next: ${nextStep.status}** to advance.\n> ${nextStep.description}`
+      ? `> Pick a status to walk the workflow step-by-step until you reach it (avoids invalid transitions).\n> **Next: ${nextStep.status}** — ${nextStep.description}`
       : `> This ticket is already at the final stage!`,
   ]
     .filter(Boolean)

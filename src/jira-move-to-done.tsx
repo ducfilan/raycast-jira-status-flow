@@ -11,8 +11,10 @@ import {
   Alert,
   LaunchProps,
   useNavigation,
+  closeMainWindow,
+  open,
 } from "@raycast/api";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import {
   resolveTicketKey,
   getIssueDetails,
@@ -24,6 +26,7 @@ import {
   autoFillDevDates,
   parseMissingFieldsFromError,
   isDocType,
+  getJiraIssueBrowseUrl,
   type JiraIssue,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
@@ -40,21 +43,16 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
   const [loading, setLoading] = useState(true);
   const [transition, setTransition] = useState<TransitionState>({ phase: "idle" });
   const [needsTicketInput, setNeedsTicketInput] = useState(false);
-  const abortRef = useRef(false);
   const { push } = useNavigation();
 
   useEffect(() => {
     load();
-    return () => {
-      abortRef.current = true;
-    };
   }, []);
 
   async function load(overrideKey?: string) {
     setLoading(true);
     setError(null);
     setNeedsTicketInput(false);
-    abortRef.current = false;
     try {
       const argKey = overrideKey || props.arguments.ticketKey;
       if (!argKey?.trim()) {
@@ -82,28 +80,12 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
       return;
     }
 
-    abortRef.current = false;
+    await closeMainWindow({ clearRootSearch: true });
+
     const completedSteps: string[] = [];
-
-    setTransition({
-      phase: "running",
-      currentTransition: `${issueData.status} → ${remaining[0].status}`,
-      completedSteps,
-      totalSteps: remaining.length,
-    });
-
     let currentStatus = issueData.status;
 
     for (const step of remaining) {
-      if (abortRef.current) break;
-
-      setTransition({
-        phase: "running",
-        currentTransition: `${currentStatus} → ${step.status}`,
-        completedSteps: [...completedSteps],
-        totalSteps: remaining.length,
-      });
-
       const toast = await showToast({
         style: Toast.Style.Animated,
         title: `Transitioning ${issueData.key}`,
@@ -117,38 +99,32 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
         toast.style = Toast.Style.Success;
         toast.title = `Done: ${step.status}`;
         toast.message = completedSteps.length < remaining.length ? "Continuing…" : "All done!";
-
-        if (completedSteps.length < remaining.length) {
-          await sleep(600);
-        }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         toast.style = Toast.Style.Failure;
         toast.title = "Transition failed";
 
-        setIssue((prev) => (prev ? { ...prev, status: currentStatus } : prev));
-
         const missingFields = parseMissingFieldsFromError(msg);
         if (missingFields.length > 0) {
           toast.hide();
-          const resumeIssue = { ...issueData, status: currentStatus };
-          push(
-            <MissingFieldsForm
-              issueKey={issueData.key}
-              missingFields={missingFields}
-              onComplete={() => runTransitionLoop(resumeIssue)}
-            />,
-          );
+          await showToast({
+            style: Toast.Style.Failure,
+            title: `${issueData.key}: required fields`,
+            message: "Opening issue in browser — fill fields and run the command again.",
+          });
+          await open(getJiraIssueBrowseUrl(issueData.key));
         } else {
           toast.message = msg;
-          setTransition({ phase: "error", failedAt: step.status, completedSteps, error: msg });
         }
         return;
       }
     }
 
-    setIssue((prev) => (prev ? { ...prev, status: "Done" } : prev));
-    setTransition({ phase: "done" });
+    await showToast({
+      style: Toast.Style.Success,
+      title: `${issueData.key} is Done`,
+      message: remaining.length > 1 ? `${remaining.length} transitions completed` : undefined,
+    });
   }
 
   async function startMoveToDone() {
@@ -280,10 +256,10 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
               onAction={async () => {
                 const next = remaining[0];
                 const doAdvance = async () => {
+                  await closeMainWindow({ clearRootSearch: true });
                   const toast = await showToast({ style: Toast.Style.Animated, title: `Advancing to ${next.status}` });
                   try {
                     await transitionIssue(issue.key, next.status);
-                    setIssue({ ...issue, status: next.status });
                     toast.style = Toast.Style.Success;
                     toast.title = `Moved to ${next.status}`;
                   } catch (e: unknown) {
@@ -292,9 +268,12 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
                     const missingFields = parseMissingFieldsFromError(msg);
                     if (missingFields.length > 0) {
                       toast.hide();
-                      push(
-                        <MissingFieldsForm issueKey={issue.key} missingFields={missingFields} onComplete={doAdvance} />,
-                      );
+                      await showToast({
+                        style: Toast.Style.Failure,
+                        title: `${issue.key}: required fields`,
+                        message: "Opening issue in browser — fill fields and try again.",
+                      });
+                      await open(getJiraIssueBrowseUrl(issue.key));
                     } else {
                       toast.message = msg;
                     }
@@ -368,7 +347,7 @@ ${error}
 
 Ticket is currently at: **${issue.status}**
 
-Press **⌘ + Return** to retry from here.
+Check the toast or run this command again after fixing the issue in Jira.
 `;
   }
 
@@ -388,10 +367,6 @@ Press **⌘ + Return** to retry from here.
 
 > **${issue.status}** → ${pathSteps}
 
-Press **⌘ + Return** to execute all ${remaining.length} transition${remaining.length !== 1 ? "s" : ""} automatically.
+Press **⌘ + Return** to run all ${remaining.length} transition${remaining.length !== 1 ? "s" : ""} in the background (Raycast closes; progress shows in toasts).
 `;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

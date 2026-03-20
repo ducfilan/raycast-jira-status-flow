@@ -166,6 +166,29 @@ export function getRemainingSteps(currentStatus: string, issueType?: string): Wo
   return workflow.slice(idx + 1);
 }
 
+export function getTransitionPathToTarget(
+  currentStatus: string,
+  targetStatus: string,
+  issueType?: string,
+): WorkflowStep[] | null {
+  const workflow = issueType ? getWorkflowForType(issueType) : TASK_WORKFLOW;
+  const cur = getWorkflowIndex(currentStatus, issueType);
+  const tgt = getWorkflowIndex(targetStatus, issueType);
+  if (cur === -1 || tgt === -1) return null;
+  if (cur === tgt) return [];
+  const path: WorkflowStep[] = [];
+  if (tgt > cur) {
+    for (let i = cur + 1; i <= tgt; i++) {
+      path.push(workflow[i]);
+    }
+  } else {
+    for (let i = cur - 1; i >= tgt; i--) {
+      path.push(workflow[i]);
+    }
+  }
+  return path;
+}
+
 // ─── Jira CLI Helpers ─────────────────────────────────────────────────────────
 
 interface Preferences {
@@ -188,6 +211,14 @@ function getJiraCliPath(): string {
 
 export function getDefaultProject(): string {
   return getPrefs().jiraProject || "";
+}
+
+export function getJiraIssueBrowseUrl(issueKey: string): string {
+  const server = getPrefs().jiraServer.replace(/\/+$/, "");
+  if (!server) {
+    throw new Error("Jira Server URL must be set in preferences.");
+  }
+  return `${server}/browse/${issueKey}`;
 }
 
 function shellEnv(): Record<string, string> {
