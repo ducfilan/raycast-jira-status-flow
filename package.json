@@ -123,6 +123,15 @@
       "default": "haichao.li@shopee.com",
       "placeholder": "reviewer@example.com",
       "description": "Auto-assign to this person when moving to 1ST REVIEW or 2ND REVIEW status."
+    },
+    {
+      "name": "developerAssignee",
+      "title": "Developer Assignee",
+      "type": "textfield",
+      "required": false,
+      "default": "",
+      "placeholder": "dev@example.com",
+      "description": "Auto-fill the Developer custom field when moving to Doing status. Also sets Dev Start Date to today."
     }
   ],
   "scripts": {

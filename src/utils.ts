@@ -199,6 +199,7 @@ interface Preferences {
   commonAssignees: string;
   qaAssignee: string;
   reviewerAssignee: string;
+  developerAssignee: string;
 }
 
 function getPrefs(): Preferences {
@@ -426,25 +427,236 @@ async function tryFallbacks(ticketKey: string, fallbacks: string[]): Promise<boo
   return false;
 }
 
-export async function transitionIssue(ticketKey: string, targetStatus: string): Promise<void> {
+// ─── REST API Transitions ─────────────────────────────────────────────────────
+
+interface TransitionFieldMeta {
+  required: boolean;
+  name: string;
+  schema?: { type?: string };
+}
+
+interface JiraTransition {
+  id: string;
+  name: string;
+  to?: { name?: string };
+  fields?: Record<string, TransitionFieldMeta>;
+}
+
+async function getAvailableTransitionsRest(ticketKey: string): Promise<JiraTransition[]> {
+  const auth = getJiraAuth();
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-s",
+      `${auth.server}/rest/api/2/issue/${ticketKey}/transitions?expand=transitions.fields`,
+      "-H",
+      `Authorization: Bearer ${auth.token}`,
+    ],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+  const parsed = JSON.parse(stdout) as { transitions?: JiraTransition[] };
+  return parsed.transitions ?? [];
+}
+
+function findTransitionByName(transitions: JiraTransition[], targetStatus: string): JiraTransition | null {
+  const target = targetStatus.toUpperCase();
+  const exact = transitions.find((t) => t.name.toUpperCase() === target);
+  if (exact) return exact;
+  const toName = transitions.find((t) => t.to?.name?.toUpperCase() === target);
+  if (toName) return toName;
+  const backTo = transitions.find((t) => t.name.toUpperCase() === `BACK TO ${target}`);
+  if (backTo) return backTo;
+  const suffix = transitions.find((t) => t.name.toUpperCase().endsWith(target) && t.name.toUpperCase() !== target);
+  if (suffix) return suffix;
+  return null;
+}
+
+/**
+ * Find the Developer custom field ID using multiple strategies:
+ * 1. Check transition screen metadata (any field with "developer" in the name)
+ * 2. Fall back to /rest/api/2/field lookup (exact + case-insensitive)
+ * 3. Fall back to searching ALL fields for "developer" substring
+ */
+async function findDeveloperFieldId(transition: JiraTransition): Promise<string | null> {
+  if (transition.fields) {
+    for (const [fieldId, meta] of Object.entries(transition.fields)) {
+      if ((meta.name ?? "").toLowerCase().includes("developer")) {
+        return fieldId;
+      }
+    }
+  }
+
+  const fromResolve = await resolveFieldId("Developer");
+  if (fromResolve) return fromResolve;
+
+  try {
+    const map = await fetchFieldMap();
+    const entry = Object.entries(map).find(([k]) => k.toLowerCase().includes("developer"));
+    if (entry) return entry[1];
+  } catch {
+    /* field list unavailable */
+  }
+
+  return null;
+}
+
+async function resolveDeveloperUser(): Promise<JiraUser> {
+  const prefs = getPrefs();
+  const devEmail = prefs.developerAssignee?.trim();
+  if (devEmail) {
+    const users = await searchJiraUser(devEmail);
+    if (users.length > 0) return users[0];
+  }
+  return getCurrentUser();
+}
+
+/**
+ * Build fields to include when transitioning to Doing/Developing.
+ * Uses transition metadata first, then field-list API as fallback.
+ */
+async function buildDoingFields(
+  transition: JiraTransition,
+): Promise<{ fields: Record<string, unknown>; descriptions: string[] }> {
+  const fields: Record<string, unknown> = {};
+  const descriptions: string[] = [];
+
+  const devFieldId = await findDeveloperFieldId(transition);
+  if (devFieldId) {
+    const devUser = await resolveDeveloperUser();
+    fields[devFieldId] = devUser.name ? { name: devUser.name } : { accountId: devUser.accountId };
+    descriptions.push(`Developer → ${devUser.displayName}`);
+  } else {
+    throw new Error(
+      'Could not find the "Developer" custom field ID. ' +
+        "The transition screen requires it but it was not found in the transition metadata or the field list API. " +
+        `Transition fields: ${JSON.stringify(transition.fields ? Object.keys(transition.fields) : "none")}`,
+    );
+  }
+
+  const today = new Date().toISOString().split("T")[0];
+
+  if (transition.fields) {
+    for (const [fieldId, meta] of Object.entries(transition.fields)) {
+      if (fields[fieldId]) continue;
+      const nameLC = (meta.name ?? "").toLowerCase();
+      if (
+        meta.schema?.type === "date" ||
+        nameLC.includes("start date") ||
+        nameLC.includes("due date")
+      ) {
+        fields[fieldId] = today;
+        descriptions.push(`${meta.name} → ${today}`);
+      }
+    }
+  }
+
+  fields[DEV_DATE_FIELDS.devStartDate.id] ??= today;
+  if (!descriptions.some((d) => d.includes("Dev Start Date"))) {
+    descriptions.push(`Dev Start Date → ${today}`);
+  }
+
+  return { fields, descriptions };
+}
+
+export interface TransitionResult {
+  autoFilled: string[];
+}
+
+async function transitionViaRest(
+  ticketKey: string,
+  targetStatus: string,
+): Promise<TransitionResult> {
+  const transitions = await getAvailableTransitionsRest(ticketKey);
+  const match = findTransitionByName(transitions, targetStatus);
+
+  const fallbackNames = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
+  const fallbackMatch = !match
+    ? fallbackNames.reduce<JiraTransition | null>(
+        (found, fb) => found ?? findTransitionByName(transitions, fb),
+        null,
+      )
+    : null;
+
+  const transition = match ?? fallbackMatch;
+  if (!transition) {
+    const available = transitions.map((t) => t.name).join(", ");
+    throw new Error(`No matching transition to "${targetStatus}" for ${ticketKey}. Available: ${available}`);
+  }
+
+  let descriptions: string[] = [];
+  let mergedFields: Record<string, unknown> = {};
+
+  if (isDoingStatus(targetStatus)) {
+    const result = await buildDoingFields(transition);
+    mergedFields = result.fields;
+    descriptions = result.descriptions;
+  }
+
+  const auth = getJiraAuth();
+  const body: Record<string, unknown> = { transition: { id: transition.id } };
+  if (Object.keys(mergedFields).length > 0) {
+    body.fields = mergedFields;
+  }
+
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-s",
+      "-w",
+      "\n%{http_code}",
+      "-X",
+      "POST",
+      `${auth.server}/rest/api/2/issue/${ticketKey}/transitions`,
+      "-H",
+      `Authorization: Bearer ${auth.token}`,
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      JSON.stringify(body),
+    ],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+
+  const lines = stdout.trim().split("\n");
+  const httpCode = lines[lines.length - 1].trim();
+  if (!httpCode.startsWith("2")) {
+    const responseBody = lines.slice(0, -1).join("\n");
+    throw new Error(`Transition to "${targetStatus}" failed (HTTP ${httpCode}): ${responseBody.slice(0, 400)}`);
+  }
+
+  return { autoFilled: descriptions };
+}
+
+export async function transitionIssue(ticketKey: string, targetStatus: string): Promise<TransitionResult> {
+  if (isDoingStatus(targetStatus)) {
+    return transitionViaRest(ticketKey, targetStatus);
+  }
+
   const fallbacks = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
 
   try {
     await tryMove(ticketKey, targetStatus);
   } catch (primaryError) {
     const errMsg = primaryError instanceof Error ? primaryError.message : String(primaryError);
-    const available = parseAvailableTransitions(errMsg);
-    const match = findMatchingTransition(targetStatus, available);
 
-    if (match) {
-      await tryMove(ticketKey, match);
-      return;
+    if (/custom field value must be set/i.test(errMsg)) {
+      return transitionViaRest(ticketKey, targetStatus);
     }
 
-    if (await tryFallbacks(ticketKey, fallbacks)) return;
+    const available = parseAvailableTransitions(errMsg);
+    const matchName = findMatchingTransition(targetStatus, available);
+
+    if (matchName) {
+      await tryMove(ticketKey, matchName);
+      return { autoFilled: [] };
+    }
+
+    if (await tryFallbacks(ticketKey, fallbacks)) return { autoFilled: [] };
 
     throw primaryError;
   }
+
+  return { autoFilled: [] };
 }
 
 // ─── Dev Date Auto-fill ───────────────────────────────────────────────────────
@@ -510,28 +722,68 @@ function getJiraAuth(): { server: string; token: string } {
 
 let cachedFieldMap: Record<string, string> | null = null;
 
+async function fetchFieldMap(): Promise<Record<string, string>> {
+  if (cachedFieldMap) return cachedFieldMap;
+
+  const auth = getJiraAuth();
+  const { stdout } = await execFileAsync(
+    "curl",
+    ["-s", `${auth.server}/rest/api/2/field`, "-H", `Authorization: Bearer ${auth.token}`],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+  const fields: Array<{ id: string; name: string }> = JSON.parse(stdout);
+  cachedFieldMap = {};
+  for (const f of fields) {
+    cachedFieldMap[f.name] = f.id;
+  }
+  return cachedFieldMap;
+}
+
 async function resolveFieldId(fieldName: string): Promise<string | null> {
   if (FIELD_NAME_TO_ID[fieldName]) return FIELD_NAME_TO_ID[fieldName];
 
-  if (!cachedFieldMap) {
-    try {
-      const auth = getJiraAuth();
-      const { stdout } = await execFileAsync(
-        "curl",
-        ["-s", `${auth.server}/rest/api/2/field`, "-H", `Authorization: Bearer ${auth.token}`],
-        { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
-      );
-      const fields: Array<{ id: string; name: string }> = JSON.parse(stdout);
-      cachedFieldMap = {};
-      for (const f of fields) {
-        cachedFieldMap[f.name] = f.id;
-      }
-    } catch {
-      cachedFieldMap = {};
-    }
+  try {
+    const map = await fetchFieldMap();
+    if (map[fieldName]) return map[fieldName];
+
+    const lower = fieldName.toLowerCase();
+    const match = Object.entries(map).find(([k]) => k.toLowerCase() === lower);
+    if (match) return match[1];
+  } catch {
+    cachedFieldMap = null;
   }
 
-  return cachedFieldMap[fieldName] ?? null;
+  return null;
+}
+
+async function setIssueFieldsRaw(ticketKey: string, fieldData: Record<string, unknown>): Promise<void> {
+  const auth = getJiraAuth();
+  const body = JSON.stringify({ fields: fieldData });
+  const { stdout } = await execFileAsync(
+    "curl",
+    [
+      "-s",
+      "-w",
+      "\n%{http_code}",
+      "-X",
+      "PUT",
+      `${auth.server}/rest/api/2/issue/${ticketKey}`,
+      "-H",
+      `Authorization: Bearer ${auth.token}`,
+      "-H",
+      "Content-Type: application/json",
+      "-d",
+      body,
+    ],
+    { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
+  );
+
+  const lines = stdout.trim().split("\n");
+  const httpCode = lines[lines.length - 1].trim();
+  if (!httpCode.startsWith("2")) {
+    const responseBody = lines.slice(0, -1).join("\n");
+    throw new Error(`Failed to update fields (HTTP ${httpCode}): ${responseBody.slice(0, 400)}`);
+  }
 }
 
 export async function setIssueCustomFields(ticketKey: string, fields: Record<string, string>): Promise<void> {
@@ -617,6 +869,13 @@ export async function autoFillDevDates(ticketKey: string): Promise<{ filled: str
   }
 
   return { filled, stillMissing };
+}
+
+// ─── Doing-status Helper ──────────────────────────────────────────────────────
+
+export function isDoingStatus(status: string): boolean {
+  const norm = normalizeStatus(status);
+  return norm === "DOING" || norm === "DEVELOPING";
 }
 
 /**
