@@ -346,11 +346,41 @@ export async function getIssueDetails(ticketKey: string): Promise<JiraIssue> {
 
 // ─── Issue List (JSON) ────────────────────────────────────────────────────────
 
-export async function getMyInProgressIssues(): Promise<JiraIssue[]> {
-  // Using 'resolution = Unresolved' instead of hardcoding statuses in the JQL.
-  // This prevents Jira API errors if a specific workflow status doesn't exist
-  // in the user's Jira instance. Unrelated statuses are filtered out by the board.
-  const jql = `assignee = currentUser() AND resolution = Unresolved`;
+export type TicketScope = "my-tickets" | "assigned";
+
+async function discoverDevFieldIds(): Promise<string[]> {
+  try {
+    const map = await fetchFieldMap();
+    const ids: string[] = [];
+    for (const [name, id] of Object.entries(map)) {
+      const lower = name.toLowerCase();
+      if (lower === "developer" || lower.includes("dev list")) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+export async function getMyInProgressIssues(scope: TicketScope = "my-tickets"): Promise<JiraIssue[]> {
+  let jql: string;
+
+  if (scope === "assigned") {
+    jql = `assignee = currentUser() AND resolution = Unresolved`;
+  } else {
+    const conditions = ["assignee = currentUser()"];
+    const devFieldIds = await discoverDevFieldIds();
+    for (const fieldId of devFieldIds) {
+      const numericId = fieldId.replace("customfield_", "");
+      conditions.push(`cf[${numericId}] = currentUser()`);
+    }
+    if (devFieldIds.length === 0) {
+      conditions.push('"Developer" = currentUser()');
+    }
+    jql = `(${conditions.join(" OR ")}) AND resolution = Unresolved`;
+  }
 
   const stdout = await runJira(`issue list --jql '${jql}' --order-by updated --raw`);
   return parseIssueListJson(stdout);

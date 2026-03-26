@@ -29,6 +29,7 @@ import {
   ALL_BOARD_STATUSES,
   type JiraIssue,
   type JiraUser,
+  type TicketScope,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
 
@@ -197,16 +198,13 @@ export default function WorkflowStatusBoard() {
   const [issues, setIssues] = useState<JiraIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("all");
+  const [scope, setScope] = useState<TicketScope>("my-tickets");
   const { push } = useNavigation();
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const fetched = await getMyInProgressIssues();
+      const fetched = await getMyInProgressIssues(scope);
       setIssues(fetched);
     } catch (e: unknown) {
       await showToast({
@@ -217,7 +215,11 @@ export default function WorkflowStatusBoard() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [scope]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   async function handleTransitionError(issueKey: string, error: unknown, retryFn: () => Promise<void>) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -400,14 +402,27 @@ export default function WorkflowStatusBoard() {
     (s) => filter === "all" || s.toUpperCase() === filter.toUpperCase(),
   );
 
+  function handleDropdownChange(value: string) {
+    if (value.startsWith("scope:")) {
+      setScope(value.replace("scope:", "") as TicketScope);
+    } else {
+      setFilter(value);
+    }
+  }
+
   return (
     <List
       isLoading={loading}
-      searchBarPlaceholder="Search tickets…"
+      navigationTitle={scope === "my-tickets" ? "My Tickets" : "Assigned to Me"}
+      searchBarPlaceholder={scope === "my-tickets" ? "Search my tickets (Developer/Dev List)…" : "Search assigned tickets…"}
       searchBarAccessory={
-        <List.Dropdown tooltip="Filter by status" onChange={setFilter}>
-          <List.Dropdown.Item title="All In-Progress" value="all" />
-          <List.Dropdown.Section title="Workflow Stages">
+        <List.Dropdown tooltip="Scope & Status" onChange={handleDropdownChange}>
+          <List.Dropdown.Section title="Ticket Scope">
+            <List.Dropdown.Item title="👤 My Tickets (Developer/Dev List)" value="scope:my-tickets" />
+            <List.Dropdown.Item title="📌 Assigned to Me Only" value="scope:assigned" />
+          </List.Dropdown.Section>
+          <List.Dropdown.Section title="Status Filter">
+            <List.Dropdown.Item title="All In-Progress" value="all" />
             {boardStatuses.map((step) => (
               <List.Dropdown.Item key={step.status} title={`${step.emoji} ${step.status}`} value={step.status} />
             ))}
