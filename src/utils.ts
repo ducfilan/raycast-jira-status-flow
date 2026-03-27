@@ -501,131 +501,121 @@ function findTransitionByName(transitions: JiraTransition[], targetStatus: strin
   return null;
 }
 
-/**
- * Find the Developer custom field ID using multiple strategies:
- * 1. Check transition screen metadata (any field with "developer" in the name)
- * 2. Fall back to /rest/api/2/field lookup (exact + case-insensitive)
- * 3. Fall back to searching ALL fields for "developer" substring
- */
-async function findDeveloperFieldId(transition: JiraTransition): Promise<string | null> {
-  if (transition.fields) {
-    for (const [fieldId, meta] of Object.entries(transition.fields)) {
-      if ((meta.name ?? "").toLowerCase().includes("developer")) {
-        return fieldId;
-      }
-    }
-  }
+// ─── Generic Transition Field Auto-fill ───────────────────────────────────────
 
-  const fromResolve = await resolveFieldId("Developer");
-  if (fromResolve) return fromResolve;
+/** Map of field name patterns to preference keys for user picker fields. */
+const USER_FIELD_PREFS: Array<{ pattern: string; prefKey: keyof Preferences }> = [
+  { pattern: "developer", prefKey: "developerAssignee" },
+  { pattern: "reviewer", prefKey: "reviewerAssignee" },
+  { pattern: "qa", prefKey: "qaAssignee" },
+];
 
-  try {
-    const map = await fetchFieldMap();
-    const entry = Object.entries(map).find(([k]) => k.toLowerCase().includes("developer"));
-    if (entry) return entry[1];
-  } catch {
-    /* field list unavailable */
-  }
-
-  return null;
-}
-
-async function resolveDeveloperUser(): Promise<JiraUser> {
+async function resolveUserForField(fieldNameLC: string): Promise<JiraUser> {
   const prefs = getPrefs();
-  const devEmail = prefs.developerAssignee?.trim();
-  if (devEmail) {
-    const users = await searchJiraUser(devEmail);
-    if (users.length > 0) return users[0];
+  for (const { pattern, prefKey } of USER_FIELD_PREFS) {
+    if (fieldNameLC.includes(pattern)) {
+      const email = (prefs[prefKey] as string)?.trim();
+      if (email) {
+        const users = await searchJiraUser(email);
+        if (users.length > 0) return users[0];
+      }
+      break;
+    }
   }
   return getCurrentUser();
 }
 
+function userFieldValue(user: JiraUser): Record<string, string | undefined> {
+  return user.name ? { name: user.name } : { accountId: user.accountId };
+}
+
+function isUserFieldName(nameLC: string): boolean {
+  return USER_FIELD_PREFS.some(({ pattern }) => nameLC.includes(pattern));
+}
+
+function isDateFieldName(nameLC: string, schema?: { type?: string }): boolean {
+  return schema?.type === "date" || nameLC.includes("date");
+}
+
 /**
- * Build fields to include when transitioning to Doing/Developing.
- * Uses transition metadata first, then field-list API as fallback.
+ * Auto-fill ALL known field types from transition metadata.
+ * Fills user fields from preferences (Developer, Reviewer, QA) and date fields with today.
  */
-async function buildDoingFields(
+async function autoFillFromTransitionMeta(
   transition: JiraTransition,
 ): Promise<{ fields: Record<string, unknown>; descriptions: string[] }> {
   const fields: Record<string, unknown> = {};
   const descriptions: string[] = [];
-
-  const devFieldId = await findDeveloperFieldId(transition);
-  if (devFieldId) {
-    const devUser = await resolveDeveloperUser();
-    fields[devFieldId] = devUser.name ? { name: devUser.name } : { accountId: devUser.accountId };
-    descriptions.push(`Developer → ${devUser.displayName}`);
-  } else {
-    throw new Error(
-      'Could not find the "Developer" custom field ID. ' +
-        "The transition screen requires it but it was not found in the transition metadata or the field list API. " +
-        `Transition fields: ${JSON.stringify(transition.fields ? Object.keys(transition.fields) : "none")}`,
-    );
-  }
+  if (!transition.fields) return { fields, descriptions };
 
   const today = new Date().toISOString().split("T")[0];
 
-  if (transition.fields) {
-    for (const [fieldId, meta] of Object.entries(transition.fields)) {
-      if (fields[fieldId]) continue;
-      const nameLC = (meta.name ?? "").toLowerCase();
-      if (
-        meta.schema?.type === "date" ||
-        nameLC.includes("start date") ||
-        nameLC.includes("due date")
-      ) {
-        fields[fieldId] = today;
-        descriptions.push(`${meta.name} → ${today}`);
-      }
-    }
-  }
+  for (const [fieldId, meta] of Object.entries(transition.fields)) {
+    const nameLC = (meta.name ?? "").toLowerCase();
 
-  fields[DEV_DATE_FIELDS.devStartDate.id] ??= today;
-  if (!descriptions.some((d) => d.includes("Dev Start Date"))) {
-    descriptions.push(`Dev Start Date → ${today}`);
+    if (isUserFieldName(nameLC)) {
+      const user = await resolveUserForField(nameLC);
+      fields[fieldId] = userFieldValue(user);
+      descriptions.push(`${meta.name} → ${user.displayName}`);
+    } else if (isDateFieldName(nameLC, meta.schema)) {
+      fields[fieldId] = today;
+      descriptions.push(`${meta.name} → ${today}`);
+    }
   }
 
   return { fields, descriptions };
 }
 
-export interface TransitionResult {
-  autoFilled: string[];
+/**
+ * Parse required field names from a REST API error body.
+ * Matches: `"FieldName" custom field value must be set.`
+ */
+function parseRequiredFieldsFromRestError(errorBody: string): string[] {
+  const re = /"([^"]+?)"\s*custom field value must be set/gi;
+  const result: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(errorBody)) !== null) {
+    result.push(m[1]);
+  }
+  return result;
 }
 
-async function transitionViaRest(
+/**
+ * Find a field ID by name: check transition metadata first, then field list API.
+ */
+async function findFieldIdByName(
+  fieldName: string,
+  transition: JiraTransition,
+): Promise<string | null> {
+  const lower = fieldName.toLowerCase();
+  if (transition.fields) {
+    for (const [fieldId, meta] of Object.entries(transition.fields)) {
+      if ((meta.name ?? "").toLowerCase() === lower) return fieldId;
+    }
+  }
+  const fromResolve = await resolveFieldId(fieldName);
+  if (fromResolve) return fromResolve;
+  try {
+    const map = await fetchFieldMap();
+    const entry = Object.entries(map).find(([k]) => k.toLowerCase() === lower);
+    if (entry) return entry[1];
+    const sub = Object.entries(map).find(([k]) => k.toLowerCase().includes(lower));
+    if (sub) return sub[1];
+  } catch {
+    /* field list unavailable */
+  }
+  return null;
+}
+
+async function postTransition(
   ticketKey: string,
-  targetStatus: string,
-): Promise<TransitionResult> {
-  const transitions = await getAvailableTransitionsRest(ticketKey);
-  const match = findTransitionByName(transitions, targetStatus);
-
-  const fallbackNames = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
-  const fallbackMatch = !match
-    ? fallbackNames.reduce<JiraTransition | null>(
-        (found, fb) => found ?? findTransitionByName(transitions, fb),
-        null,
-      )
-    : null;
-
-  const transition = match ?? fallbackMatch;
-  if (!transition) {
-    const available = transitions.map((t) => t.name).join(", ");
-    throw new Error(`No matching transition to "${targetStatus}" for ${ticketKey}. Available: ${available}`);
-  }
-
-  let descriptions: string[] = [];
-  let mergedFields: Record<string, unknown> = {};
-
-  if (isDoingStatus(targetStatus)) {
-    const result = await buildDoingFields(transition);
-    mergedFields = result.fields;
-    descriptions = result.descriptions;
-  }
-
+  transitionId: string,
+  fields: Record<string, unknown>,
+): Promise<string> {
   const auth = getJiraAuth();
-  const body: Record<string, unknown> = { transition: { id: transition.id } };
-  if (Object.keys(mergedFields).length > 0) {
-    body.fields = mergedFields;
+  const body: Record<string, unknown> = { transition: { id: transitionId } };
+  if (Object.keys(fields).length > 0) {
+    body.fields = fields;
   }
 
   const { stdout } = await execFileAsync(
@@ -647,21 +637,98 @@ async function transitionViaRest(
     { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
   );
 
-  const lines = stdout.trim().split("\n");
-  const httpCode = lines[lines.length - 1].trim();
-  if (!httpCode.startsWith("2")) {
-    const responseBody = lines.slice(0, -1).join("\n");
-    throw new Error(`Transition to "${targetStatus}" failed (HTTP ${httpCode}): ${responseBody.slice(0, 400)}`);
+  return stdout;
+}
+
+export interface TransitionResult {
+  autoFilled: string[];
+}
+
+/**
+ * Transition via REST API with automatic field filling.
+ * 1. Auto-fill known fields from transition metadata.
+ * 2. POST the transition.
+ * 3. If it fails because of missing custom fields, resolve them, auto-fill, and retry.
+ */
+async function transitionViaRest(ticketKey: string, targetStatus: string): Promise<TransitionResult> {
+  const transitions = await getAvailableTransitionsRest(ticketKey);
+  const match = findTransitionByName(transitions, targetStatus);
+
+  const fallbackNames = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
+  const fallbackMatch = !match
+    ? fallbackNames.reduce<JiraTransition | null>(
+        (found, fb) => found ?? findTransitionByName(transitions, fb),
+        null,
+      )
+    : null;
+
+  const transition = match ?? fallbackMatch;
+  if (!transition) {
+    const available = transitions.map((t) => t.name).join(", ");
+    throw new Error(`No matching transition to "${targetStatus}" for ${ticketKey}. Available: ${available}`);
+  }
+
+  const { fields, descriptions } = await autoFillFromTransitionMeta(transition);
+
+  if (isDoingStatus(targetStatus)) {
+    const today = new Date().toISOString().split("T")[0];
+    fields[DEV_DATE_FIELDS.devStartDate.id] ??= today;
+    if (!descriptions.some((d) => d.includes("Dev Start Date"))) {
+      descriptions.push(`Dev Start Date → ${today}`);
+    }
+  }
+
+  // --- First attempt ---
+  const firstOut = await postTransition(ticketKey, transition.id, fields);
+  const firstLines = firstOut.trim().split("\n");
+  const firstCode = firstLines[firstLines.length - 1].trim();
+  if (firstCode.startsWith("2")) {
+    return { autoFilled: descriptions };
+  }
+
+  // --- Parse missing fields from error and retry ---
+  const firstBody = firstLines.slice(0, -1).join("\n");
+  const missingNames = parseRequiredFieldsFromRestError(firstBody);
+  if (missingNames.length === 0) {
+    throw new Error(`Transition to "${targetStatus}" failed (HTTP ${firstCode}): ${firstBody.slice(0, 400)}`);
+  }
+
+  const retryFields = { ...fields };
+  const today = new Date().toISOString().split("T")[0];
+
+  for (const fieldName of missingNames) {
+    const fieldId = await findFieldIdByName(fieldName, transition);
+    if (!fieldId) continue;
+    if (retryFields[fieldId] != null) continue;
+
+    const nameLC = fieldName.toLowerCase();
+    if (isUserFieldName(nameLC)) {
+      const user = await resolveUserForField(nameLC);
+      retryFields[fieldId] = userFieldValue(user);
+      descriptions.push(`${fieldName} → ${user.displayName}`);
+    } else if (isDateFieldName(nameLC)) {
+      retryFields[fieldId] = today;
+      descriptions.push(`${fieldName} → ${today}`);
+    } else {
+      const user = await getCurrentUser();
+      retryFields[fieldId] = userFieldValue(user);
+      descriptions.push(`${fieldName} → ${user.displayName}`);
+    }
+  }
+
+  // --- Retry ---
+  const retryOut = await postTransition(ticketKey, transition.id, retryFields);
+  const retryLines = retryOut.trim().split("\n");
+  const retryCode = retryLines[retryLines.length - 1].trim();
+  if (!retryCode.startsWith("2")) {
+    const retryBody = retryLines.slice(0, -1).join("\n");
+    throw new Error(`Transition to "${targetStatus}" failed (HTTP ${retryCode}): ${retryBody.slice(0, 400)}`);
   }
 
   return { autoFilled: descriptions };
 }
 
 export async function transitionIssue(ticketKey: string, targetStatus: string): Promise<TransitionResult> {
-  if (isDoingStatus(targetStatus)) {
-    return transitionViaRest(ticketKey, targetStatus);
-  }
-
   const fallbacks = STATUS_FALLBACKS[targetStatus.toUpperCase()] ?? [];
 
   try {
