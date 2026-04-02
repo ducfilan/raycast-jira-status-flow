@@ -11,8 +11,6 @@ import {
   Alert,
   LaunchProps,
   useNavigation,
-  closeMainWindow,
-  open,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
@@ -26,7 +24,6 @@ import {
   autoFillDevDates,
   parseMissingFieldsFromError,
   isDocType,
-  getJiraIssueBrowseUrl,
   type JiraIssue,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
@@ -80,10 +77,10 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
       return;
     }
 
-    await closeMainWindow({ clearRootSearch: true });
-
     const completedSteps: string[] = [];
     let currentStatus = issueData.status;
+
+    setTransition({ phase: "running", currentTransition: remaining[0].status, completedSteps, totalSteps: remaining.length });
 
     for (const step of remaining) {
       const toast = await showToast({
@@ -92,10 +89,13 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
         message: `${currentStatus} → ${step.status}`,
       });
 
+      setTransition({ phase: "running", currentTransition: step.status, completedSteps, totalSteps: remaining.length });
+
       try {
         await transitionIssue(issueData.key, step.status);
         completedSteps.push(`${step.emoji} ${step.status}`);
         currentStatus = step.status;
+        setIssue((prev) => (prev ? { ...prev, status: currentStatus } : prev));
         toast.style = Toast.Style.Success;
         toast.title = `Done: ${step.status}`;
         toast.message = completedSteps.length < remaining.length ? "Continuing…" : "All done!";
@@ -107,18 +107,22 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
         const missingFields = parseMissingFieldsFromError(msg);
         if (missingFields.length > 0) {
           toast.hide();
-          await showToast({
-            style: Toast.Style.Failure,
-            title: `${issueData.key}: required fields`,
-            message: "Opening issue in browser — fill fields and run the command again.",
-          });
-          await open(getJiraIssueBrowseUrl(issueData.key));
+          push(
+            <MissingFieldsForm
+              issueKey={issueData.key}
+              missingFields={missingFields}
+              onComplete={() => runTransitionLoop({ ...issueData, status: currentStatus })}
+            />
+          );
         } else {
           toast.message = msg;
+          setTransition({ phase: "error", failedAt: step.status, completedSteps, error: msg });
         }
         return;
       }
     }
+
+    setTransition({ phase: "done" });
 
     await showToast({
       style: Toast.Style.Success,
@@ -256,24 +260,27 @@ export default function MoveToDone(props: LaunchProps<{ arguments: Arguments.Jir
               onAction={async () => {
                 const next = remaining[0];
                 const doAdvance = async () => {
-                  await closeMainWindow({ clearRootSearch: true });
                   const toast = await showToast({ style: Toast.Style.Animated, title: `Advancing to ${next.status}` });
                   try {
                     await transitionIssue(issue.key, next.status);
                     toast.style = Toast.Style.Success;
                     toast.title = `Moved to ${next.status}`;
+                    setIssue((prev) => (prev ? { ...prev, status: next.status } : prev));
                   } catch (e: unknown) {
                     const msg = e instanceof Error ? e.message : String(e);
                     toast.style = Toast.Style.Failure;
                     const missingFields = parseMissingFieldsFromError(msg);
                     if (missingFields.length > 0) {
                       toast.hide();
-                      await showToast({
-                        style: Toast.Style.Failure,
-                        title: `${issue.key}: required fields`,
-                        message: "Opening issue in browser — fill fields and try again.",
-                      });
-                      await open(getJiraIssueBrowseUrl(issue.key));
+                      push(
+                        <MissingFieldsForm
+                          issueKey={issue.key}
+                          missingFields={missingFields}
+                          onComplete={() => {
+                            setIssue((prev) => (prev ? { ...prev, status: next.status } : prev));
+                          }}
+                        />
+                      );
                     } else {
                       toast.message = msg;
                     }

@@ -27,6 +27,9 @@ import {
   autoAssignForStatus,
   isDocType,
   ALL_BOARD_STATUSES,
+  DEV_DATE_FIELDS,
+  setIssueCustomFields,
+  getIssueRawFields,
   type JiraIssue,
   type JiraUser,
   type TicketScope,
@@ -190,6 +193,162 @@ function AssigneeForm({ issueKey, onAssigned }: { issueKey: string; onAssigned: 
       {query.trim() !== "" && users.length === 0 && !searching && (
         <List.EmptyView title="No users found" description={`No results for "${query}"`} />
       )}
+    </List>
+  );
+}
+
+type DatePreset = { label: string; getDate: () => string };
+
+function formatDate(d: Date): string {
+  return d.toISOString().split("T")[0];
+}
+
+function nextWeekday(dayOfWeek: number): Date {
+  const d = new Date();
+  const diff = (dayOfWeek - d.getDay() + 7) % 7 || 7;
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function addDays(n: number): Date {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+const DATE_PRESETS: DatePreset[] = [
+  { label: "Today", getDate: () => formatDate(new Date()) },
+  { label: "Tomorrow", getDate: () => formatDate(addDays(1)) },
+  { label: "Next Monday", getDate: () => formatDate(nextWeekday(1)) },
+  { label: "Next Friday", getDate: () => formatDate(nextWeekday(5)) },
+  { label: "In 1 Week", getDate: () => formatDate(addDays(7)) },
+  { label: "In 2 Weeks", getDate: () => formatDate(addDays(14)) },
+  { label: "In 1 Month", getDate: () => formatDate(addDays(30)) },
+];
+
+type DevDateField = "devStartDate" | "devDueDate";
+
+function DevDatesForm({
+  issueKey,
+  onUpdated,
+}: {
+  issueKey: string;
+  onUpdated: () => void;
+}) {
+  const [currentDates, setCurrentDates] = useState<Record<string, string | null>>({});
+  const [loadingDates, setLoadingDates] = useState(true);
+  const [selectedField, setSelectedField] = useState<DevDateField | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await getIssueRawFields(issueKey, [
+          DEV_DATE_FIELDS.devStartDate.id,
+          DEV_DATE_FIELDS.devDueDate.id,
+        ]);
+        setCurrentDates(raw);
+      } catch {
+        /* best-effort */
+      } finally {
+        setLoadingDates(false);
+      }
+    })();
+  }, [issueKey]);
+
+  async function handleSetDate(field: DevDateField, date: string) {
+    const fieldDef = DEV_DATE_FIELDS[field];
+    const toast = await showToast({
+      style: Toast.Style.Animated,
+      title: `Setting ${fieldDef.name}`,
+      message: `${issueKey} → ${date}`,
+    });
+    try {
+      await setIssueCustomFields(issueKey, { [fieldDef.name]: date });
+      toast.style = Toast.Style.Success;
+      toast.title = `${fieldDef.name} updated`;
+      toast.message = `${issueKey}: ${date}`;
+      setCurrentDates((prev) => ({ ...prev, [fieldDef.id]: date }));
+      setSelectedField(null);
+      onUpdated();
+    } catch (e: unknown) {
+      toast.style = Toast.Style.Failure;
+      toast.title = "Failed to update date";
+      toast.message = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  const fields: { key: DevDateField; name: string; id: string }[] = [
+    { key: "devStartDate", name: DEV_DATE_FIELDS.devStartDate.name, id: DEV_DATE_FIELDS.devStartDate.id },
+    { key: "devDueDate", name: DEV_DATE_FIELDS.devDueDate.name, id: DEV_DATE_FIELDS.devDueDate.id },
+  ];
+
+  if (selectedField) {
+    const fieldDef = DEV_DATE_FIELDS[selectedField];
+    const currentValue = currentDates[fieldDef.id];
+    return (
+      <List
+        isLoading={loadingDates}
+        navigationTitle={`${issueKey} — ${fieldDef.name}`}
+        searchBarPlaceholder={`Pick a date for ${fieldDef.name}…`}
+      >
+        {currentValue && (
+          <List.Section title="Current Value">
+            <List.Item
+              title={currentValue}
+              icon={Icon.Calendar}
+              accessories={[{ tag: "current" }]}
+            />
+          </List.Section>
+        )}
+        <List.Section title="Quick Dates">
+          {DATE_PRESETS.map((preset) => {
+            const date = preset.getDate();
+            return (
+              <List.Item
+                key={preset.label}
+                title={preset.label}
+                subtitle={date}
+                icon={Icon.Clock}
+                actions={
+                  <ActionPanel>
+                    <Action
+                      title={`Set to ${preset.label} (${date})`}
+                      onAction={() => handleSetDate(selectedField, date)}
+                    />
+                    <Action title="Back" onAction={() => setSelectedField(null)} shortcut={{ modifiers: ["cmd"], key: "backspace" }} />
+                  </ActionPanel>
+                }
+              />
+            );
+          })}
+        </List.Section>
+      </List>
+    );
+  }
+
+  return (
+    <List
+      isLoading={loadingDates}
+      navigationTitle={`${issueKey} — Dev Dates`}
+      searchBarPlaceholder="Choose a date field to update…"
+    >
+      {fields.map((f) => {
+        const currentValue = currentDates[f.id];
+        return (
+          <List.Item
+            key={f.key}
+            title={f.name}
+            subtitle={currentValue ?? "Not set"}
+            icon={Icon.Calendar}
+            accessories={currentValue ? [{ tag: currentValue }] : [{ tag: { value: "empty", color: Color.SecondaryText } }]}
+            actions={
+              <ActionPanel>
+                <Action title={`Change ${f.name}`} onAction={() => setSelectedField(f.key)} />
+              </ActionPanel>
+            }
+          />
+        );
+      })}
     </List>
   );
 }
@@ -513,6 +672,19 @@ export default function WorkflowStatusBoard() {
                                     prev.map((i) => (i.key === issue.key ? { ...i, assignee: name } : i)),
                                   )
                                 }
+                              />,
+                            )
+                          }
+                        />
+                        <Action
+                          title="Change Dev Dates"
+                          icon={Icon.Calendar}
+                          shortcut={{ modifiers: ["cmd"], key: "d" }}
+                          onAction={() =>
+                            push(
+                              <DevDatesForm
+                                issueKey={issue.key}
+                                onUpdated={load}
                               />,
                             )
                           }

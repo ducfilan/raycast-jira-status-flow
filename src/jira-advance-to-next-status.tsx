@@ -10,8 +10,6 @@ import {
   openExtensionPreferences,
   LaunchProps,
   useNavigation,
-  closeMainWindow,
-  open,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
@@ -27,16 +25,22 @@ import {
   autoFillDevDates,
   parseMissingFieldsFromError,
   isDocType,
-  getJiraIssueBrowseUrl,
   type JiraIssue,
   type WorkflowStep,
 } from "./utils";
 import MissingFieldsForm from "./missing-fields-form";
 
+type TransitionState =
+  | { phase: "idle" }
+  | { phase: "running"; currentTransition: string; completedSteps: string[]; totalSteps: number }
+  | { phase: "done" }
+  | { phase: "error"; failedAt: string; completedSteps: string[]; error: string };
+
 export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: Arguments.JiraAdvanceToNextStatus }>>) {
   const [issue, setIssue] = useState<JiraIssue | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [transition, setTransition] = useState<TransitionState>({ phase: "idle" });
   const [needsTicketInput, setNeedsTicketInput] = useState(false);
   const { push } = useNavigation();
 
@@ -70,49 +74,66 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   async function runChainedTransitions(startIssue: JiraIssue, path: WorkflowStep[]) {
     if (path.length === 0) return;
 
-    await closeMainWindow({ clearRootSearch: true });
-
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: `Moving ${startIssue.key}`,
-      message: `0/${path.length} — ${startIssue.status}`,
-    });
-
+    const completedSteps: string[] = [];
     let current = startIssue;
+
+    setTransition({ phase: "running", currentTransition: path[0].status, completedSteps, totalSteps: path.length });
 
     for (let i = 0; i < path.length; i++) {
       const next = path[i];
-      toast.message = `${i + 1}/${path.length}: ${current.status} → ${next.status}`;
+
+      const toast = await showToast({
+        style: Toast.Style.Animated,
+        title: `Moving ${startIssue.key}`,
+        message: `${i + 1}/${path.length}: ${current.status} → ${next.status}`,
+      });
+
+      setTransition({ phase: "running", currentTransition: next.status, completedSteps, totalSteps: path.length });
 
       try {
         await transitionIssue(current.key, next.status);
+        completedSteps.push(`${next.emoji} ${next.status}`);
+        
+        toast.style = Toast.Style.Success;
+        toast.title = `Moved to ${next.status}`;
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         const missingFields = parseMissingFieldsFromError(msg);
+        
         if (missingFields.length > 0) {
           toast.hide();
-          await showToast({
-            style: Toast.Style.Failure,
-            title: `${current.key}: required fields`,
-            message: "Opening issue in browser — fill fields and run the command again.",
-          });
-          await open(getJiraIssueBrowseUrl(current.key));
+          push(
+            <MissingFieldsForm
+              issueKey={current.key}
+              missingFields={missingFields}
+              onComplete={() => {
+                void runChainedTransitions(current, path.slice(i));
+              }}
+            />,
+          );
           return;
         }
+        
         toast.style = Toast.Style.Failure;
         toast.title = "Transition failed";
         toast.message = msg;
+        
+        setTransition({ phase: "error", failedAt: next.status, completedSteps, error: msg });
         return;
       }
 
       current = { ...current, status: next.status };
+      setIssue(current);
     }
 
+    setTransition({ phase: "done" });
+
     const last = path.at(-1)!;
-    toast.style = Toast.Style.Success;
-    toast.title = `${startIssue.key} → ${last.status}`;
-    toast.message =
-      path.length > 1 ? `${path.length} steps — now ${last.emoji} ${last.status}` : `Now: ${last.emoji} ${last.status}`;
+    await showToast({
+      style: Toast.Style.Success,
+      title: `${startIssue.key} → ${last.status}`,
+      message: path.length > 1 ? `${path.length} steps — now ${last.emoji} ${last.status}` : `Now: ${last.emoji} ${last.status}`
+    });
   }
 
   async function handleTransition(targetStep: WorkflowStep) {
@@ -217,10 +238,11 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
   const progress = currentIndex >= 0 ? Math.round((currentIndex / (workflow.length - 1)) * 100) : 0;
   const progressBar = buildProgressBar(currentIndex, workflow.length);
 
-  const isDoneUi = normalizeStatus(issue.status) === normalizeStatus("Done");
+  const isRunning = transition.phase === "running";
+  const isDoneUi = transition.phase === "done" || normalizeStatus(issue.status) === normalizeStatus("Done");
   const markdown = isDoneUi
     ? buildDoneMarkdown(issue, workflow)
-    : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, progressBar, progress);
+    : buildAdvanceMarkdown(issue, workflow, currentStep, nextStep, progressBar, progress, transition);
 
   const metadata = (
     <List.Item.Detail.Metadata>
@@ -248,10 +270,10 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
           title={`Next: ${nextStep.status}`}
           icon={nextStep.emoji}
           subtitle={nextStep.description}
-          detail={<List.Item.Detail markdown={markdown} metadata={metadata} />}
+          detail={<List.Item.Detail isLoading={isRunning} markdown={markdown} metadata={metadata} />}
           actions={
             <ActionPanel>
-              <Action title={`Advance to ${nextStep.status}`} onAction={() => handleTransition(nextStep)} />
+              {!isRunning && <Action title={`Advance to ${nextStep.status}`} onAction={() => handleTransition(nextStep)} />}
               <Action
                 title="Copy Ticket Key"
                 shortcut={{ modifiers: ["cmd"], key: "c" }}
@@ -276,10 +298,10 @@ export default function AdvanceStatus(props: Readonly<LaunchProps<{ arguments: A
             title={step.status}
             icon={step.emoji}
             subtitle={subtitle}
-            detail={<List.Item.Detail markdown={markdown} metadata={metadata} />}
+            detail={<List.Item.Detail isLoading={isRunning} markdown={markdown} metadata={metadata} />}
             actions={
               <ActionPanel>
-                <Action title={`Move to ${step.status}`} onAction={() => handleTransition(step)} />
+                {!isRunning && <Action title={`Move to ${step.status}`} onAction={() => handleTransition(step)} />}
                 <Action
                   title="Copy Ticket Key"
                   shortcut={{ modifiers: ["cmd"], key: "c" }}
@@ -309,7 +331,40 @@ function buildAdvanceMarkdown(
   nextStep: WorkflowStep | null,
   progressBar: string,
   progress: number,
+  transition: TransitionState,
 ): string {
+  if (transition.phase === "running") {
+    const { completedSteps, currentTransition, totalSteps } = transition;
+    const bar = "▓".repeat(completedSteps.length) + "░".repeat(totalSteps - completedSteps.length);
+    return `# ${issue.key} — Transitioning…
+
+\`[${bar}]\` ${completedSteps.length} / ${totalSteps}
+
+**Now:** ${currentTransition}
+
+${completedSteps.map((s) => `- ${s}`).join("\n")}
+`;
+  }
+
+  if (transition.phase === "error") {
+    const { completedSteps, failedAt, error } = transition;
+    return `# ${issue.key} — Transition Failed
+
+**Failed at:** ${failedAt}
+
+${completedSteps.length > 0 ? `**Completed before failure:**\n${completedSteps.map((s) => `- ${s}`).join("\n")}` : ""}
+
+**Error:**
+\`\`\`
+${error}
+\`\`\`
+
+Ticket is currently at: **${issue.status}**
+
+Check the toast or run this command again after fixing the issue in Jira.
+`;
+  }
+
   const normStatus = normalizeStatus(issue.status);
   const workflowTable = workflow
     .map((step, idx) => {

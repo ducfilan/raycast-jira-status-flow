@@ -1,6 +1,6 @@
 import { ActionPanel, Action, Form, showToast, Toast, useNavigation } from "@raycast/api";
-import { useState } from "react";
-import { setIssueCustomFields } from "./utils";
+import { useState, useEffect } from "react";
+import { setIssueCustomFields, getRoleAssignee, getCurrentUser } from "./utils";
 
 interface MissingFieldsFormProps {
   issueKey: string;
@@ -10,6 +10,11 @@ interface MissingFieldsFormProps {
 
 function isDateField(fieldName: string): boolean {
   return /date/i.test(fieldName);
+}
+
+function isUserField(fieldName: string): boolean {
+  const lower = fieldName.toLowerCase();
+  return lower.includes("developer") || lower.includes("reviewer") || lower.includes("qa") || lower.includes("assignee");
 }
 
 function formatDate(d: Date): string {
@@ -22,6 +27,41 @@ function formatDate(d: Date): string {
 export default function MissingFieldsForm({ issueKey, missingFields, onComplete }: MissingFieldsFormProps) {
   const { pop } = useNavigation();
   const [submitting, setSubmitting] = useState(false);
+  const [defaultValues, setDefaultValues] = useState<Record<string, string | Date>>({});
+  const [loadingDefaults, setLoadingDefaults] = useState(true);
+
+  useEffect(() => {
+    async function loadDefaults() {
+      const defaults: Record<string, string | Date> = {};
+      try {
+        const currentUser = await getCurrentUser();
+        
+        for (const name of missingFields) {
+          const lower = name.toLowerCase();
+          const id = name.replaceAll(/\s+/g, "_");
+          
+          if (isDateField(name)) {
+            defaults[id] = new Date();
+          } else if (lower.includes("developer")) {
+            defaults[id] = getRoleAssignee("developer") || currentUser.emailAddress || currentUser.displayName;
+          } else if (lower.includes("qa") || lower.includes("tester")) {
+            defaults[id] = getRoleAssignee("qa") || currentUser.emailAddress || currentUser.displayName;
+          } else if (lower.includes("reviewer")) {
+            defaults[id] = getRoleAssignee("reviewer") || currentUser.emailAddress || currentUser.displayName;
+          } else if (isUserField(name)) {
+            defaults[id] = currentUser.emailAddress || currentUser.displayName;
+          }
+        }
+      } catch (e) {
+        // silently fail and just don't set defaults
+      }
+      
+      setDefaultValues(defaults);
+      setLoadingDefaults(false);
+    }
+    
+    loadDefaults();
+  }, [missingFields]);
 
   async function handleSubmit(values: Record<string, unknown>) {
     setSubmitting(true);
@@ -64,7 +104,7 @@ export default function MissingFieldsForm({ issueKey, missingFields, onComplete 
   return (
     <Form
       navigationTitle={`${issueKey} — Fill Required Fields`}
-      isLoading={submitting}
+      isLoading={submitting || loadingDefaults}
       actions={
         <ActionPanel>
           <Action.SubmitForm title="Save & Continue" onSubmit={handleSubmit} />
@@ -72,12 +112,14 @@ export default function MissingFieldsForm({ issueKey, missingFields, onComplete 
       }
     >
       <Form.Description text={`The following fields are required before transitioning ${issueKey}.`} />
-      {missingFields.map((name) => {
+      {!loadingDefaults && missingFields.map((name) => {
         const id = name.replaceAll(/\s+/g, "_");
+        const defaultVal = defaultValues[id];
+        
         if (isDateField(name)) {
-          return <Form.DatePicker key={id} id={id} title={name} type={Form.DatePicker.Type.Date} />;
+          return <Form.DatePicker key={id} id={id} title={name} type={Form.DatePicker.Type.Date} defaultValue={defaultVal as Date | undefined} />;
         }
-        return <Form.TextField key={id} id={id} title={name} placeholder={`Enter ${name}`} />;
+        return <Form.TextField key={id} id={id} title={name} placeholder={`Enter ${name}`} defaultValue={defaultVal as string | undefined} />;
       })}
     </Form>
   );

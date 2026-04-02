@@ -352,10 +352,10 @@ async function discoverDevFieldIds(): Promise<string[]> {
   try {
     const map = await fetchFieldMap();
     const ids: string[] = [];
-    for (const [name, id] of Object.entries(map)) {
+    for (const [name, meta] of Object.entries(map)) {
       const lower = name.toLowerCase();
       if (lower === "developer" || lower.includes("dev list")) {
-        ids.push(id);
+        ids.push(meta.id);
       }
     }
     return ids;
@@ -598,9 +598,9 @@ async function findFieldIdByName(
   try {
     const map = await fetchFieldMap();
     const entry = Object.entries(map).find(([k]) => k.toLowerCase() === lower);
-    if (entry) return entry[1];
+    if (entry) return entry[1].id;
     const sub = Object.entries(map).find(([k]) => k.toLowerCase().includes(lower));
-    if (sub) return sub[1];
+    if (sub) return sub[1].id;
   } catch {
     /* field list unavailable */
   }
@@ -817,9 +817,14 @@ function getJiraAuth(): { server: string; token: string } {
   return { server, token };
 }
 
-let cachedFieldMap: Record<string, string> | null = null;
+interface JiraFieldMeta {
+  id: string;
+  schema?: { type?: string; custom?: string };
+}
 
-async function fetchFieldMap(): Promise<Record<string, string>> {
+let cachedFieldMap: Record<string, JiraFieldMeta> | null = null;
+
+async function fetchFieldMap(): Promise<Record<string, JiraFieldMeta>> {
   if (cachedFieldMap) return cachedFieldMap;
 
   const auth = getJiraAuth();
@@ -828,16 +833,21 @@ async function fetchFieldMap(): Promise<Record<string, string>> {
     ["-s", `${auth.server}/rest/api/2/field`, "-H", `Authorization: Bearer ${auth.token}`],
     { env: shellEnv(), maxBuffer: 10 * 1024 * 1024 },
   );
-  const fields: Array<{ id: string; name: string }> = JSON.parse(stdout);
+  const fields: Array<{ id: string; name: string; schema?: { type?: string; custom?: string } }> = JSON.parse(stdout);
   cachedFieldMap = {};
   for (const f of fields) {
-    cachedFieldMap[f.name] = f.id;
+    cachedFieldMap[f.name] = { id: f.id, schema: f.schema };
   }
   return cachedFieldMap;
 }
 
 async function resolveFieldId(fieldName: string): Promise<string | null> {
-  if (FIELD_NAME_TO_ID[fieldName]) return FIELD_NAME_TO_ID[fieldName];
+  const meta = await resolveFieldMeta(fieldName);
+  return meta ? meta.id : null;
+}
+
+async function resolveFieldMeta(fieldName: string): Promise<JiraFieldMeta | null> {
+  if (FIELD_NAME_TO_ID[fieldName]) return { id: FIELD_NAME_TO_ID[fieldName] };
 
   try {
     const map = await fetchFieldMap();
@@ -886,11 +896,26 @@ async function setIssueFieldsRaw(ticketKey: string, fieldData: Record<string, un
 export async function setIssueCustomFields(ticketKey: string, fields: Record<string, string>): Promise<void> {
   const auth = getJiraAuth();
 
-  const fieldData: Record<string, string> = {};
+  const fieldData: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(fields)) {
-    const id = await resolveFieldId(name);
-    if (!id) throw new Error(`Could not resolve Jira field ID for "${name}".`);
-    fieldData[id] = value;
+    const meta = await resolveFieldMeta(name);
+    if (!meta) throw new Error(`Could not resolve Jira field ID for "${name}".`);
+
+    const isUserField =
+      meta.schema?.type === "user" ||
+      meta.schema?.custom === "com.atlassian.jira.plugin.system.customfieldtypes:userpicker" ||
+      isUserFieldName(name.toLowerCase());
+
+    if (isUserField) {
+      const users = await searchJiraUser(value);
+      if (users.length > 0) {
+        fieldData[meta.id] = userFieldValue(users[0]);
+      } else {
+        fieldData[meta.id] = value.includes("@") ? { accountId: value } : { name: value };
+      }
+    } else {
+      fieldData[meta.id] = value;
+    }
   }
 
   const body = JSON.stringify({ fields: fieldData });
@@ -980,7 +1005,7 @@ export function isDoingStatus(status: string): boolean {
  * Returns the list of missing field names, or empty array if not matched.
  */
 export function parseMissingFieldsFromError(errorMsg: string): string[] {
-  const match = errorMsg.match(/(?:please )?fill in (.+)/i);
+  const match = errorMsg.match(/(?:please )?fill in (.*?)(?:\s+before\b|\s+to\b|\.$|$)/i);
   if (!match) return [];
   return match[1]
     .split(/[,;]|\band\b/i)
@@ -1010,9 +1035,12 @@ const ROLE_FIELD_NAMES: Record<"qa" | "reviewer", string> = {
   reviewer: "Development Reviewer",
 };
 
-export function getRoleAssignee(role: "qa" | "reviewer"): string {
+export function getRoleAssignee(role: "qa" | "reviewer" | "developer"): string {
   const prefs = getPrefs();
-  return (role === "qa" ? prefs.qaAssignee : prefs.reviewerAssignee)?.trim() || "";
+  if (role === "qa") return prefs.qaAssignee?.trim() || "";
+  if (role === "reviewer") return prefs.reviewerAssignee?.trim() || "";
+  if (role === "developer") return prefs.developerAssignee?.trim() || "";
+  return "";
 }
 
 async function getIssueFieldUser(ticketKey: string, fieldName: string): Promise<JiraUser | null> {
